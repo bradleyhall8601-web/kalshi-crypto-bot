@@ -59,9 +59,13 @@ const isFast = s => /15M$/.test(s);
 const ttlFor = ticker => isFast(String(ticker).split('-')[0]) ? CFG.FAST_TTL_MIN : CFG.ALERT_TTL_MIN;
 let pinnedId = null;
 function settingsText() { return Object.entries(SETTINGS).map(([n, x]) => `${n} = ${CFG[x.key]}`).join('\n') + `\nmarkets = ${CFG.SERIES.join(', ')}`; }
-async function saveSettings() {
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 4; blob.SC = S.sc;
-  const text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
+let saveChain = Promise.resolve();
+function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
+async function saveSettingsNow() {
+  if (!OWNER) return;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 4; blob.SC = S.sc; blob.LED = S.led;
+  let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
+  if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok || /not modified/.test(r.error || '')) return; }
   const r = await tg('sendMessage', { chat_id: OWNER, text, disable_notification: true });
   if (r.ok) { pinnedId = r.result.message_id; await tg('pinChatMessage', { chat_id: OWNER, message_id: pinnedId, disable_notification: true }); }
@@ -79,14 +83,15 @@ async function loadSettings() {
     if (!(blob.v >= 3)) { CFG.SCAN_EVERY_MIN = 1; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 2)) { for (const x of ['KXBTC15M', 'KXETH15M']) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); setTimeout(saveSettings, 2000); } // add 15-min markets once
     if (blob.SC && typeof blob.SC === 'object') S.sc = { ...S.sc, ...blob.SC, ev: blob.SC.ev || {} };
+    if (blob.LED && typeof blob.LED.spent === 'number') S.led = blob.LED;
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
   } catch (e) { log('settings parse error', e.message); }
 }
 let scanTimer = null;
-function schedule() { if (scanTimer) clearInterval(scanTimer); scanTimer = setInterval(tick, CFG.SCAN_EVERY_MIN * 60e3); }
+function schedule() { if (scanTimer) clearInterval(scanTimer); if (env.BOT_TEST !== '1') scanTimer = setInterval(tick, CFG.SCAN_EVERY_MIN * 60e3); }
 
-const S = { sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+const S = { led: { day: '', spent: 0 }, sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
@@ -117,11 +122,16 @@ async function tg(method, payload) {
 }
 const say = (text, extra = {}) => OWNER ? tg('sendMessage', { chat_id: OWNER, text, ...extra }) : null;
 const num = v => (v === undefined || v === null || v === '') ? NaN : Number(v);
-const d = (o, k) => { const a = num(o[k + '_dollars']); if (a === a) return a; const b = num(o[k]); return b === b ? b / 100 : NaN; };
+const d = (o, k) => {
+  const a = num(o[k + '_dollars']); if (a === a) return a;
+  const f = num(o[k + '_fixed']); if (f === f) return f;
+  const v = o[k]; const b = num(v); if (!(b === b)) return NaN;
+  return typeof v === 'string' && v.includes('.') ? b : b / 100; // "0.0068" = dollars, 68 = cents
+};
 const cnt = (o, k = 'count') => { const a = num(o[k + '_fp']); return a === a ? a : (num(o[k]) || 0); };
 const feeTotal = (c, p) => Math.ceil(0.07 * c * p * (1 - p) * 100 - 1e-9) / 100;
 const money = x => '$' + Number(x).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const cents = x => Math.round(x * 100) + '¢';
+const cents = x => { const v = Math.round(x * 1000) / 10; return (Number.isInteger(v) ? v : v.toFixed(1)) + '¢'; };
 const timeCT = iso => new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, hour: 'numeric', minute: '2-digit' }).format(new Date(iso)) + ' CT';
 function startOfTodayCT() {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(new Date()).map(x => [x.type, x.value]));
@@ -140,7 +150,12 @@ async function pageAll(path, key) {
 // ---------- account (everything rebuilt from Kalshi, so restarts lose nothing) ----------
 let acctCache = null;
 async function account(fresh = false) {
-  if (!fresh && acctCache && Date.now() - acctCache.t < 20000) return acctCache.v;
+  // history (settlements, fills, positions) is cached briefly; the wallet balance is ALWAYS fetched fresh
+  if (!fresh && acctCache && Date.now() - acctCache.t < 20000) {
+    const b = await kalshi('GET', '/portfolio/balance');
+    const shards = {}; for (const x of b.balance_breakdown || []) shards[x.exchange_index] = Number(x.balance) || 0;
+    return { ...acctCache.v, cash: d(b, 'balance'), shards };
+  }
   const v = await accountRaw(); acctCache = { t: Date.now(), v }; return v;
 }
 async function accountRaw() {
@@ -152,8 +167,20 @@ async function accountRaw() {
   for (const s of settles) profit += d(s, 'revenue') - (d(s, 'yes_total_cost') || 0) - (d(s, 'no_total_cost') || 0) - (d(s, 'fee_cost') || 0);
   // today's spend = buys filled since midnight CT
   const fills = await pageAll(`/portfolio/fills?min_ts=${startOfTodayCT()}`, 'fills');
-  let spent = 0;
-  for (const f of fills) if ((f.action || 'buy') === 'buy') { const px = d(f, f.side === 'no' ? 'no_price' : 'yes_price'); spent += cnt(f) * px + (d(f, 'fee_cost') || feeTotal(cnt(f), px)); }
+  if (fills.length && !S.loggedFill) { S.loggedFill = 1; log('FILLSAMPLE', JSON.stringify(fills[0])); }
+  let fillSpent = 0;
+  for (const f of fills) {
+    // a NO buy can show up as a YES sell in Kalshi's new single-leg format; count both as money spent
+    const isBuy = (f.action || 'buy') === 'buy' || (f.action === 'sell' && f.side === 'yes' && f.is_opening !== false && f.purpose !== 'close');
+    if (!isBuy) continue;
+    const buyNo = f.side === 'no' || f.action === 'sell';
+    const px = buyNo ? (d(f, 'no_price') === d(f, 'no_price') ? d(f, 'no_price') : 1 - d(f, 'yes_price')) : d(f, 'yes_price');
+    const fee = d(f, 'fee_cost');
+    if (px === px) fillSpent += cnt(f) * px + (fee === fee ? fee : feeTotal(cnt(f), px));
+  }
+  const today = String(startOfTodayCT());
+  if (S.led.day !== today) S.led = { day: today, spent: 0 };
+  const spent = Math.max(fillSpent, S.led.spent); // never under-count
   // events we already hold
   const pos = await kalshi('GET', '/portfolio/positions?count_filter=position&limit=1000');
   const held = new Set((pos.market_positions || []).filter(p => cnt(p, 'position') !== 0).map(p => p.ticker.split('-').slice(0, -1).join('-')));
@@ -162,7 +189,9 @@ async function accountRaw() {
   else if (S.unlocked && profit < CFG.RELOCK_PROFIT) { S.unlocked = false; await say(`🔒 Profit fell to ${money(profit)}. Back to confirm mode (${money(CFG.SMALL_TRADE)}/trade, ${money(CFG.SMALL_DAY)}/day).`); }
   const tradeCap = S.unlocked ? Math.max(CFG.SMALL_TRADE, cash * CFG.SCALED_TRADE_PCT) : CFG.SMALL_TRADE;
   const dayCap = S.unlocked ? Math.max(CFG.SMALL_DAY, cash * CFG.SCALED_DAY_PCT) : CFG.SMALL_DAY;
-  return { cash, profit, spent, held, tradeCap, dayCap, settledCount: settles.length };
+  // per-shard cash so we know what's really spendable
+  const shards = {}; for (const x of b.balance_breakdown || []) shards[x.exchange_index] = Number(x.balance) || 0;
+  return { cash, shards, profit, spent, held, tradeCap, dayCap, settledCount: settles.length };
 }
 
 // Kalshi splits cash across exchange shards. Bots must fund the market's shard before ordering.
@@ -205,7 +234,10 @@ async function placeBuy({ ticker, side, count, price }) {
   const avgYes = num(o.average_fill_price);
   const px = avgYes === avgYes ? (side === 'yes' ? avgYes : 1 - avgYes) : price;
   const fees = num(o.average_fee_paid) === num(o.average_fee_paid) ? num(o.average_fee_paid) * filled : feeTotal(filled, px);
-  return { filled, total: filled * px + fees };
+  const total = filled * px + fees;
+  const today = String(startOfTodayCT()); if (S.led.day !== today) S.led = { day: today, spent: 0 };
+  S.led.spent += total; await saveSettings().catch(() => {});
+  return { filled, total, fees, px };
 }
 
 // ---------- model ----------
@@ -237,7 +269,7 @@ async function coinState(product) {
   const pxs = prices.map(x => x.px).sort((a, b) => a - b);
   const spot = pxs.length ? pxs[Math.floor(pxs.length / 2)] : NaN; // median across exchanges
   const sig1h = sd(r.slice(-60)), sig5h = sd(r.slice(-300)), sig15 = sd(r.slice(-15));
-  const sig = Math.max(sig1h, sig5h) * CFG.VOL_MULT;
+  const sig = Math.sqrt((sig1h * sig1h + sig5h * sig5h) / 2) * CFG.VOL_MULT; // blend, not max (max overstates swings)
   const nowS = Date.now() / 1000;
   // price N minutes ago, looked up by timestamp (candles can lag a couple of minutes)
   const pxAgo = n => { const target = nowS - n * 60; let best = candles[0]; for (const k of candles) if (k[0] <= target) best = k; return best[4]; };
@@ -280,12 +312,13 @@ function condLine(st, other) {
 // Full analysis of one Kalshi market given live conditions. Returns per-side verdicts.
 function evaluate(m, st, now = Date.now()) {
   const mins = (new Date(m.close_time).getTime() - now) / 60000;
+  const T = Math.max(mins - 2 / 3, 0.25); // Kalshi settles on a 60-second average, which cuts the last minute's variance
   const { spot, sig } = st;
   const fl = num(m.floor_strike), cp = num(m.cap_strike), sty = String(m.strike_type);
   let pY;
-  if (sty.startsWith('greater')) pY = probAbove(spot, fl, sig, mins);
-  else if (sty.startsWith('less')) pY = 1 - probAbove(spot, cp, sig, mins);
-  else if (sty === 'between') pY = probAbove(spot, fl, sig, mins) - probAbove(spot, cp, sig, mins);
+  if (sty.startsWith('greater')) pY = probAbove(spot, fl, sig, T);
+  else if (sty.startsWith('less')) pY = 1 - probAbove(spot, cp, sig, T);
+  else if (sty === 'between') pY = probAbove(spot, fl, sig, T) - probAbove(spot, cp, sig, T);
   else return [];
   if (!(pY >= 0 && pY <= 1)) return [];
   const yAsk = d(m, 'yes_ask'), nAsk = d(m, 'no_ask');
@@ -322,6 +355,7 @@ async function scan(fast) {
 
   const a = await account();
   let remaining = a.dayCap - a.spent;
+  if (env.BOT_DEBUG === '1') log('BUDGET', JSON.stringify({ dayCap: a.dayCap, spent: a.spent, cash: a.cash }));
   if (remaining < 0.5) return;
 
   const cond = await marketConditions(), cands = [];
@@ -330,11 +364,13 @@ async function scan(fast) {
     const lo = isFast(series) ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES, hi = isFast(series) ? CFG.FAST_MAX_MINUTES : CFG.MAX_MINUTES;
     const markets = await pageAll(`/markets?series_ticker=${series}&status=open`, 'markets');
     if (!S.seen[series]) { S.seen[series] = 1; log('SERIES', series, 'open markets:', markets.length); }
-    if (cond[product].problems.length) { if (!S.condWarn || Date.now() - S.condWarn > 15 * 60e3) { S.condWarn = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; ')); } continue; }
+    if (cond[product].problems.length) { if (env.BOT_DEBUG === '1') log('COND', product, cond[product].problems.join('; '));
+      if (!S.condWarn || Date.now() - S.condWarn > 15 * 60e3) { S.condWarn = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; ')); } continue; }
     for (const m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
       if (!(mins >= lo && mins <= hi)) continue;
       if (a.held.has(m.event_ticker) || S.sc.ev[m.event_ticker]) continue; // ONE alert per market window, ever — next one only when a new window opens
+      for (const v of evaluate(m, cond[product], now)) if (env.BOT_DEBUG === '1') log('EVAL', m.ticker, v.side, JSON.stringify({ raw: v.raw, mkt: v.mkt, p: v.p, ask: v.ask, edge: v.edge, reasons: v.reasons }));
       for (const v of evaluate(m, cond[product], now)) if (v.ok) cands.push({ m, product, ...v, cond: condLine(cond[product], cond[product === 'BTC-USD' ? 'ETH-USD' : 'BTC-USD']) });
     }
   }
@@ -345,29 +381,34 @@ async function scan(fast) {
   for (const c of cands) {
     if (sent >= CFG.MAX_ALERTS_PER_RUN) break;
     if (used.has(c.m.event_ticker)) continue;
-    const budget = Math.min(a.tradeCap, remaining);
-    let count = Math.floor(budget / c.ask);
-    while (count > 0 && count * c.ask + feeTotal(count, c.ask) > budget) count--;
-    if (count < 1) continue;
+    // size within: per-trade cap, today's remaining budget, AND the cash actually in the wallet (fees + 2¢ slippage included)
+    const worst = Math.min(c.ask + CFG.MAX_SLIPPAGE, 0.99);
+    const budget = Math.min(a.tradeCap, remaining, a.cash - 0.02);
+    let count = Math.floor(budget / worst);
+    while (count > 0 && count * worst + feeTotal(count, worst) > budget) count--;
+    if (env.BOT_DEBUG === '1') log('SIZE', c.m.ticker, JSON.stringify({ cap: a.tradeCap, remaining, cash: a.cash, worst, count }));
+    if (count < 1) { if (a.cash < 1 && !S.lowCashWarned) { S.lowCashWarned = Date.now(); await say(`💸 Wallet is low (${money(a.cash)}). Trade ideas paused until you add funds on Kalshi.`); } continue; }
     S.sc.open.push({ t: c.m.ticker, s: c.side[0], p: Math.round(c.p * 1000) / 1000, a: c.ask, c: Date.parse(c.m.close_time) }); if (S.sc.open.length > 25) S.sc.open.shift();
     used.add(c.m.event_ticker); S.recentAlerts[c.m.ticker] = Date.now(); S.sc.ev[c.m.event_ticker] = Date.parse(c.m.close_time); sent++;
-    const cost = count * c.ask + feeTotal(count, c.ask);
+    const fee = feeTotal(count, c.ask), cost = count * c.ask + fee;
     const coin = c.product.split('-')[0];
     const st = String(c.m.strike_type);
     const strike = isFast(c.m.event_ticker.split('-')[0]) ? `UP from ${money(num(c.m.floor_strike))} (15-min) — YES = up, NO = down` : st === 'between' ? `${money(num(c.m.floor_strike))}–${money(num(c.m.cap_strike))}` : st.startsWith('less') ? `below ${money(num(c.m.cap_strike))}` : `${money(num(c.m.floor_strike))} or above`;
     const info = `${coin} ${isFast(c.m.event_ticker.split('-')[0]) ? strike : (c.m.yes_sub_title || strike)} at ${timeCT(c.m.close_time)} (closes in ${Math.round(c.mins)} min)\n\n` +
-      `👉 BUY ${c.side.toUpperCase()}: ${count} @ ${cents(c.ask)} = ${money(cost)}\n` +
+      `👉 BUY ${c.side.toUpperCase()}: ${count} @ ${cents(c.ask)} = ${money(cost)} (incl. ${money(fee)} fee)\n` +
       `Win: +${money(count - cost)} · Lose: −${money(cost)}\n` +
       `Win chance: bot ${(c.p * 100).toFixed(0)}% (model ${(c.raw * 100).toFixed(0)}%, market ${(c.mkt * 100).toFixed(0)}%) vs price ${(c.ask * 100).toFixed(0)}¢ → edge ${(c.edge * 100).toFixed(1)}¢\n` +
-      `${coin} now ${money(c.spot)} · Today ${money(a.spent)}/${money(a.dayCap)} · Profit ${money(a.profit)}\n📊 ${c.cond}`;
+      `💰 Wallet ${money(a.cash)} → ${money(a.cash - cost)} after · Today ${money(a.spent)}/${money(a.dayCap)} · Profit ${money(a.profit)}\n📊 ${c.cond} · ${coin} ${money(c.spot)}`;
     if (S.unlocked) {
-      const r = await placeBuy({ ticker: c.m.ticker, side: c.side, count, price: c.ask });
-      remaining -= r.total; acctCache = null; await saveSettings().catch(() => {});
-      await say(`🤖 AUTO ${r.filled ? 'BOUGHT' : 'NOT FILLED'} ${r.filled}/${count}\n\n` + info);
+      try {
+        const r = await placeBuy({ ticker: c.m.ticker, side: c.side, count, price: c.ask });
+        remaining -= r.total; a.cash -= r.total; acctCache = null;
+        await say(`🤖 AUTO ${r.filled ? `BOUGHT ${r.filled}/${count} for ${money(r.total)} (fees ${money(r.fees)})` : 'NOT FILLED'}\n\n` + info);
+      } catch (e) { log('auto order failed', e.message); await say(`⚠️ AUTO order failed: ${e.message.replace(/^.*?-> /, '').slice(0, 200)}\n\n` + info); }
     } else {
       const id = crypto.randomBytes(4).toString('hex');
       S.pending[id] = { ticker: c.m.ticker, side: c.side, price: c.ask, count, created: Date.now() };
-      let okData = `o|${c.m.ticker}|${c.side[0]}|${Math.round(c.ask * 100)}|${count}`, noData = `x|${c.m.ticker}`;
+      let okData = `b|${c.m.ticker}|${c.side[0]}|${Math.round(c.ask * 1000)}|${count}`, noData = `x|${c.m.ticker}`;
       if (Buffer.byteLength(okData) > 64) { okData = `ok|${id}`; noData = `no|${id}`; }
       await saveSettings().catch(() => {}); // records this window as alerted before the message goes out
       await say(`🔔 TRADE IDEA — tap within ${ttlFor(c.m.ticker) < 2 ? ttlFor(c.m.ticker) * 60 + ' sec' : ttlFor(c.m.ticker) + ' min'}\n\n` + info, {
@@ -510,7 +551,7 @@ async function onUpdate(u) {
     }
     const parts = String(q.data).split('|');
     let p = S.pending[id];
-    if (act === 'o' || act === 'x') p = { ticker: parts[1], side: parts[2] === 'y' ? 'yes' : 'no', price: Number(parts[3]) / 100, count: Number(parts[4]), created: (q.message?.date || 0) * 1000 };
+    if (act === 'o' || act === 'b' || act === 'x') p = { ticker: parts[1], side: parts[2] === 'y' ? 'yes' : 'no', price: Number(parts[3]) / (act === 'b' ? 1000 : 100), count: Number(parts[4]), created: (q.message?.date || 0) * 1000 };
     const done = async (toast, line) => { await tg('answerCallbackQuery', { callback_query_id: q.id, text: toast }); await tg('editMessageText', { chat_id: chat, message_id: mid, text: (q.message.text || '') + '\n\n' + line }); };
     if (!p) return done('Expired', '⏹ No longer active.');
     delete S.pending[id];
@@ -518,7 +559,6 @@ async function onUpdate(u) {
     await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Placing order…' });
     if (Date.now() - p.created > ttlFor(p.ticker) * 60e3 + 5000) return done('Expired', '⌛ Too late — price may have moved.');
     const a = await account(true);
-    if (a.spent + p.count * p.price + feeTotal(p.count, p.price) > a.dayCap + 0.001) return done('Daily limit hit', `🛑 Daily limit ${money(a.dayCap)} reached.`);
     const m = (await kalshi('GET', `/markets/${p.ticker}`)).market || {};
     const ask = d(m, p.side + '_ask');
     if (!(ask > 0) || ask > p.price + CFG.MAX_SLIPPAGE) return done('Price moved', `⚠️ Price moved to ${cents(ask)}. Not bought.`);
@@ -531,13 +571,20 @@ async function onUpdate(u) {
       const why = v ? (relaxed.length ? relaxed : v.reasons).join('; ') : 'market data unavailable';
       return done('Not bought — conditions changed', `🛑 Live re-check failed: ${why}. Not bought.`);
     }
-    // never spend more than the per-trade cap, even if the price ticks up before the fill
+    // worst-case cost (price can tick up to the limit) must fit the per-trade cap, today's budget and the wallet
     const limit = Math.min(p.price + CFG.MAX_SLIPPAGE, 0.99);
+    const worstCost = n => n * limit + feeTotal(n, limit);
+    const room = Math.min(a.tradeCap, a.dayCap - a.spent, a.cash - 0.02);
     let count = p.count;
-    while (count > 1 && count * limit + feeTotal(count, limit) > a.tradeCap + 0.001) count--;
+    while (count > 0 && worstCost(count) > room + 0.001) count--;
+    if (count < 1) {
+      if (a.dayCap - a.spent < worstCost(1)) return done('Daily limit hit', `🛑 Daily limit reached: spent ${money(a.spent)} of ${money(a.dayCap)} today.`);
+      return done('Not enough cash', `🛑 Not enough cash: 1 contract needs up to ${money(worstCost(1))} incl. fees, wallet has ${money(a.cash)}.`);
+    }
     const r = await placeBuy({ ticker: p.ticker, side: p.side, count, price: limit }); acctCache = null;
-    p.count = count;
-    return done(r.filled ? 'Bought!' : 'Not filled', r.filled ? `✅ BOUGHT ${r.filled}/${p.count} for ${money(r.total)}` : '⚠️ Not filled.');
+    return done(r.filled ? 'Bought!' : 'Not filled', r.filled
+      ? `✅ BOUGHT ${r.filled}/${count} @ ${cents(r.px)} for ${money(r.total)} (fees ${money(r.fees)}) · wallet ≈ ${money(a.cash - r.total)}`
+      : '⚠️ Not filled — nobody was selling at that price. No money spent.');
   }
   const msg = u.message; if (!msg || typeof msg.text !== 'string') return;
   const chat = String(msg.chat.id), t = msg.text.trim().toLowerCase();
@@ -666,7 +713,9 @@ async function tick(fast = false) {
   }
   finally { S.busy = false; }
 }
-setInterval(() => tick(true), 30e3); // 15-min markets checked every 30 seconds
-setTimeout(tick, 15000);
+if (env.BOT_TEST !== '1') { // tests drive scans manually
+  setInterval(() => tick(true), 30e3); // 15-min markets checked every 30 seconds
+  setTimeout(tick, 15000);
+}
 // keep the free Render instance awake
 if (PUBLIC_URL) setInterval(() => fetch(PUBLIC_URL + '/').catch(() => {}), 4 * 60e3);
