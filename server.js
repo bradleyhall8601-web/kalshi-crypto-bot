@@ -5,7 +5,12 @@ const crypto = require('crypto');
 
 const env = process.env;
 const KEY_ID = env.KALSHI_KEY_ID || '';
-const PEM = (env.KALSHI_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+// accept the key pasted any way (spaces, \\n, one line) and rebuild a clean PEM
+const PEM = (() => { const raw = String(env.KALSHI_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+  const m = raw.match(/-----BEGIN ([A-Z ]*PRIVATE KEY)-----([\s\S]*?)-----END \1-----/);
+  if (!m) return raw; const body = m[2].replace(/\s+/g, '');
+  return `-----BEGIN ${m[1]}-----\n${body.match(/.{1,64}/g).join('\n')}\n-----END ${m[1]}-----\n`; })();
+let SIGN_KEY = null; try { if (PEM.includes('PRIVATE KEY')) SIGN_KEY = crypto.createPrivateKey(PEM); } catch (e) { console.log('KALSHI KEY INVALID:', e.message); }
 const TG_TOKEN = env.TELEGRAM_BOT_TOKEN || '';
 let OWNER = env.TELEGRAM_CHAT_ID || '';
 const OWNER_CODE = env.OWNER_CODE || ''; // must be sent as '/start CODE' to claim the bot
@@ -83,9 +88,11 @@ async function req(url, { method = 'GET', headers = {}, body } = {}) {
 }
 async function kalshi(method, path, body) {
   const ts = Date.now().toString();
-  const sig = crypto.sign('sha256', Buffer.from(ts + method + PREFIX + path.split('?')[0]), {
-    key: PEM, padding: crypto.constants.RSA_PKCS1_PSS_PADDING, saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
-  }).toString('base64');
+  const msg = Buffer.from(ts + method + PREFIX + path.split('?')[0]);
+  const sig = (SIGN_KEY.asymmetricKeyType === 'ed25519'
+    ? crypto.sign(null, msg, SIGN_KEY) // Ed25519 keys sign the message directly
+    : crypto.sign('sha256', msg, { key: SIGN_KEY, padding: crypto.constants.RSA_PKCS1_PSS_PADDING, saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST })
+  ).toString('base64');
   return req(BASE + PREFIX + path, { method, body, headers: { 'KALSHI-ACCESS-KEY': KEY_ID, 'KALSHI-ACCESS-TIMESTAMP': ts, 'KALSHI-ACCESS-SIGNATURE': sig } });
 }
 async function tg(method, payload) {
@@ -164,7 +171,7 @@ async function spotVol(product) {
 
 // ---------- scan ----------
 async function scan() {
-  if (!KEY_ID || !PEM.includes('PRIVATE KEY') || !OWNER) return;
+  if (!KEY_ID || !SIGN_KEY || !OWNER) return;
   if (S.paused) return;
   const now = Date.now();
   for (const [k, v] of Object.entries(S.recentAlerts)) if (now - v > 3 * 3600e3) delete S.recentAlerts[k];
@@ -304,7 +311,7 @@ async function runTool(name, input) {
 }
 
 async function askClaude(text) {
-  if (!ANTHROPIC_KEY) return say('⚠️ /claude needs ANTHROPIC_API_KEY set on the server.');
+  if (!ANTHROPIC_KEY) return say('💬 Claude chat in Telegram is off (no Claude API credit). For code changes, message Claude in the Claude app. Settings work here: /set, /settings, /help.');
   await tg('sendChatAction', { chat_id: OWNER, action: 'typing' });
   let source = '(source unavailable)';
   try { if (GH_TOKEN && GH_REPO) source = (await getSource()).code; } catch (e) {}
@@ -422,6 +429,8 @@ http.createServer((rq, rs) => {
     { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'rollback', description: 'Undo last code change' },
     { command: 'help', description: 'All commands' }] });
   await loadSettings(); schedule();
+  try { const me = await tg('getMe', {}); log('SELFCHECK telegram', me.ok ? 'OK @' + me.result.username : 'FAILED'); } catch (e) { log('SELFCHECK telegram FAILED', e.message); }
+  try { const b = await kalshi('GET', '/portfolio/balance'); log('SELFCHECK kalshi OK balance', JSON.stringify(b)); } catch (e) { log('SELFCHECK kalshi FAILED', e.message); }
   if (OWNER) say(`🟢 Bot running (version ${VERSION}). Send /help anytime.`);
 });
 
