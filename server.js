@@ -89,7 +89,11 @@ async function req(url, { method = 'GET', headers = {}, body } = {}) {
   if (!r.ok) throw new Error(`${method} ${url.split('?')[0].replace(/\/bot[^/]+/, '/bot***')} -> ${r.status}: ${t.slice(0, 300)}`);
   return t ? JSON.parse(t) : {};
 }
-async function kalshi(method, path, body) {
+async function kalshi(method, path, body, tries = 0) {
+  try { return await kalshiOnce(method, path, body); }
+  catch (e) { if (/-> 429/.test(e.message) && tries < 4) { await new Promise(r => setTimeout(r, 1000 * (tries + 1))); return kalshi(method, path, body, tries + 1); } throw e; }
+}
+async function kalshiOnce(method, path, body) {
   const ts = Date.now().toString();
   const msg = Buffer.from(ts + method + PREFIX + path.split('?')[0]);
   const sig = (SIGN_KEY.asymmetricKeyType === 'ed25519'
@@ -125,7 +129,12 @@ async function pageAll(path, key) {
 }
 
 // ---------- account (everything rebuilt from Kalshi, so restarts lose nothing) ----------
-async function account() {
+let acctCache = null;
+async function account(fresh = false) {
+  if (!fresh && acctCache && Date.now() - acctCache.t < 20000) return acctCache.v;
+  const v = await accountRaw(); acctCache = { t: Date.now(), v }; return v;
+}
+async function accountRaw() {
   const b = await kalshi('GET', '/portfolio/balance');
   const cash = d(b, 'balance');
   // realized profit = settled payouts minus what those positions cost, since START_TS
@@ -231,7 +240,7 @@ async function scan(fast) {
       `${coin} now ${money(c.spot)} · Today ${money(a.spent)}/${money(a.dayCap)} · Profit ${money(a.profit)}`;
     if (S.unlocked) {
       const r = await placeBuy({ ticker: c.m.ticker, side: c.side, count, price: c.ask });
-      remaining -= r.total;
+      remaining -= r.total; acctCache = null;
       await say(`🤖 AUTO ${r.filled ? 'BOUGHT' : 'NOT FILLED'} ${r.filled}/${count}\n\n` + info);
     } else {
       const id = crypto.randomBytes(4).toString('hex');
@@ -380,12 +389,12 @@ async function onUpdate(u) {
     delete S.pending[id];
     if (act === 'no') return done('Skipped', '❌ Skipped.');
     if (Date.now() - p.created > CFG.ALERT_TTL_MIN * 60e3) return done('Expired', '⌛ Too late — price may have moved.');
-    const a = await account();
+    const a = await account(true);
     if (a.spent + p.count * p.price + feeTotal(p.count, p.price) > a.dayCap + 0.001) return done('Daily limit hit', `🛑 Daily limit ${money(a.dayCap)} reached.`);
     const m = (await kalshi('GET', `/markets/${p.ticker}`)).market || {};
     const ask = d(m, p.side + '_ask');
     if (!(ask > 0) || ask > p.price + CFG.MAX_SLIPPAGE) return done('Price moved', `⚠️ Price moved to ${cents(ask)}. Not bought.`);
-    const r = await placeBuy({ ticker: p.ticker, side: p.side, count: p.count, price: Math.min(p.price + CFG.MAX_SLIPPAGE, 0.99) });
+    const r = await placeBuy({ ticker: p.ticker, side: p.side, count: p.count, price: Math.min(p.price + CFG.MAX_SLIPPAGE, 0.99) }); acctCache = null;
     return done(r.filled ? 'Bought!' : 'Not filled', r.filled ? `✅ BOUGHT ${r.filled}/${p.count} for ${money(r.total)}` : '⚠️ Not filled.');
   }
   const msg = u.message; if (!msg || typeof msg.text !== 'string') return;
