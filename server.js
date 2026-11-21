@@ -433,7 +433,12 @@ async function onUpdate(u) {
     const m = (await kalshi('GET', `/markets/${p.ticker}`)).market || {};
     const ask = d(m, p.side + '_ask');
     if (!(ask > 0) || ask > p.price + CFG.MAX_SLIPPAGE) return done('Price moved', `⚠️ Price moved to ${cents(ask)}. Not bought.`);
-    const r = await placeBuy({ ticker: p.ticker, side: p.side, count: p.count, price: Math.min(p.price + CFG.MAX_SLIPPAGE, 0.99) }); acctCache = null;
+    // never spend more than the per-trade cap, even if the price ticks up before the fill
+    const limit = Math.min(p.price + CFG.MAX_SLIPPAGE, 0.99);
+    let count = p.count;
+    while (count > 1 && count * limit + feeTotal(count, limit) > a.tradeCap + 0.001) count--;
+    const r = await placeBuy({ ticker: p.ticker, side: p.side, count, price: limit }); acctCache = null;
+    p.count = count;
     return done(r.filled ? 'Bought!' : 'Not filled', r.filled ? `✅ BOUGHT ${r.filled}/${p.count} for ${money(r.total)}` : '⚠️ Not filled.');
   }
   const msg = u.message; if (!msg || typeof msg.text !== 'string') return;
