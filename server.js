@@ -8,6 +8,7 @@ const KEY_ID = env.KALSHI_KEY_ID || '';
 const PEM = (env.KALSHI_PRIVATE_KEY || '').replace(/\\n/g, '\n');
 const TG_TOKEN = env.TELEGRAM_BOT_TOKEN || '';
 let OWNER = env.TELEGRAM_CHAT_ID || '';
+const OWNER_CODE = env.OWNER_CODE || ''; // must be sent as '/start CODE' to claim the bot
 const START_TS = Number(env.BOT_START_TS || Math.floor(Date.now() / 1000)); // profit counted from here
 const PUBLIC_URL = env.RENDER_EXTERNAL_URL || env.PUBLIC_URL || '';
 const BASE = env.KALSHI_ENV === 'demo' ? 'https://demo-api.kalshi.co' : 'https://api.elections.kalshi.com';
@@ -77,7 +78,7 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 async function req(url, { method = 'GET', headers = {}, body } = {}) {
   const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json', ...headers }, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text();
-  if (!r.ok) throw new Error(`${method} ${url.split('?')[0]} -> ${r.status}: ${t.slice(0, 300)}`);
+  if (!r.ok) throw new Error(`${method} ${url.split('?')[0].replace(/\/bot[^/]+/, '/bot***')} -> ${r.status}: ${t.slice(0, 300)}`);
   return t ? JSON.parse(t) : {};
 }
 async function kalshi(method, path, body) {
@@ -309,7 +310,7 @@ async function askClaude(text) {
   try { if (GH_TOKEN && GH_REPO) source = (await getSource()).code; } catch (e) {}
   const system = `You are Claude, built into Brad's Kalshi crypto prediction bot and chatting with him on Telegram. Be concise and plain-spoken; he reads on his phone.
 You can change live settings (set_setting), control the bot (control), read live numbers (get_status), and propose code edits (propose_code_change, which he must approve).
-Rules: prefer settings over code. Never write code that sends API keys, private keys or tokens anywhere, removes the per-trade/daily caps, or disables the Approve step for code changes. If a request would raise risk a lot (e.g. much bigger trades), do it if he asks clearly but say the risk in one line. Never promise profits.
+Rules: prefer settings over code. Never reveal, print or write code that sends API keys, private keys or tokens anywhere, removes the per-trade/daily caps, or disables the Approve step for code changes. If a request would raise risk a lot (e.g. much bigger trades), do it if he asks clearly but say the risk in one line. Never promise profits.
 Current settings:\n${settingsText()}\nMode: ${S.paused ? 'paused' : S.unlocked ? 'auto' : 'confirm'} · version ${VERSION}
 Bot source (server.js):\n<source>\n${source}\n</source>`;
   chatHistory.push({ role: 'user', content: text });
@@ -377,7 +378,9 @@ async function onUpdate(u) {
   }
   const msg = u.message; if (!msg || typeof msg.text !== 'string') return;
   const chat = String(msg.chat.id), t = msg.text.trim().toLowerCase();
-  if (!OWNER) { OWNER = chat; log(`OWNER_CHAT_ID=${chat}`); await say(`✅ You're connected as the owner. I'll send trade ideas here.\nSend /help for commands.`); await saveSettings(); return; }
+  if (!OWNER) {
+    if (!OWNER_CODE || msg.text.trim().split(/\s+/)[1] !== OWNER_CODE) { log('rejected claim attempt from chat', chat); return tg('sendMessage', { chat_id: chat, text: 'Private bot.' }); }
+    OWNER = chat; log(`OWNER_CHAT_ID=${chat}`); await say(`✅ You're connected as the owner. I'll send trade ideas here.\nSend /help for commands.`); await saveSettings(); return; }
   if (chat !== OWNER) return tg('sendMessage', { chat_id: chat, text: 'Private bot.' });
   if (t.startsWith('/pause')) { S.paused = true; await saveSettings(); return say('⏸ Paused.'); }
   if (t.startsWith('/resume')) { S.paused = false; await saveSettings(); return say('▶️ Running.'); }
@@ -400,17 +403,18 @@ async function onUpdate(u) {
 }
 
 // ---------- server ----------
+const HOOK_SECRET = crypto.createHash('sha256').update('wh:' + TG_TOKEN + KEY_ID).digest('hex');
 const HOOK = '/tg/' + crypto.createHash('sha256').update(TG_TOKEN || 'x').digest('hex').slice(0, 24);
 http.createServer((rq, rs) => {
   if (rq.method === 'POST' && rq.url === HOOK) {
-    let b = ''; rq.on('data', c => b += c); rq.on('end', () => { rs.end('ok'); try { onUpdate(JSON.parse(b)).catch(e => log('update err', e.message)); } catch (e) {} });
+    if (rq.headers['x-telegram-bot-api-secret-token'] !== HOOK_SECRET) { rs.statusCode = 403; return rs.end(); }
+    let b = ''; rq.on('data', c => { b += c; if (b.length > 1e6) rq.destroy(); }); rq.on('end', () => { rs.end('ok'); try { onUpdate(JSON.parse(b)).catch(e => log('update err', e.message)); } catch (e) {} });
     return;
   }
-  const ready = { kalshi_key: !!KEY_ID && PEM.includes('PRIVATE KEY'), telegram: !!TG_TOKEN, owner_connected: !!OWNER, mode: S.paused ? 'paused' : S.unlocked ? 'auto' : 'confirm', last_scan: S.lastScan, last_error: S.lastError };
-  rs.setHeader('Content-Type', 'application/json'); rs.end(JSON.stringify(ready, null, 2));
+  rs.setHeader('Content-Type', 'text/plain'); rs.end('ok'); // reveal nothing publicly
 }).listen(env.PORT || 10000, async () => {
   log('listening', env.PORT || 10000);
-  if (TG_TOKEN && PUBLIC_URL) { const r = await tg('setWebhook', { url: PUBLIC_URL + HOOK, allowed_updates: ['message', 'callback_query'] }); log('webhook', JSON.stringify(r)); }
+  if (TG_TOKEN && PUBLIC_URL) { const r = await tg('setWebhook', { url: PUBLIC_URL + HOOK, secret_token: HOOK_SECRET, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true }); log('webhook', JSON.stringify(r)); }
   if (TG_TOKEN) await tg('setMyCommands', { commands: [
     { command: 'claude', description: 'Talk to Claude / ask for changes' }, { command: 'status', description: 'Money, profit & mode' },
     { command: 'settings', description: 'See all settings' }, { command: 'set', description: 'Change a setting: /set trade 3' },
