@@ -76,7 +76,7 @@ async function loadSettings() {
     if (!(blob.v >= 4)) { CFG.VOL_MULT = 1.0; CFG.MIN_EDGE = 0.04; CFG.MIN_PRICE = Math.max(CFG.MIN_PRICE, 0.15); if (typeof blob.MODEL_WEIGHT !== 'number') CFG.MODEL_WEIGHT = 0.5; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 3)) { CFG.SCAN_EVERY_MIN = 1; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 2)) { for (const x of ['KXBTC15M', 'KXETH15M']) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); setTimeout(saveSettings, 2000); } // add 15-min markets once
-    if (blob.SC && typeof blob.SC === 'object') S.sc = { ...S.sc, ...blob.SC };
+    if (blob.SC && typeof blob.SC === 'object') S.sc = { ...S.sc, ...blob.SC, ev: blob.SC.ev || {} };
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
   } catch (e) { log('settings parse error', e.message); }
@@ -84,7 +84,7 @@ async function loadSettings() {
 let scanTimer = null;
 function schedule() { if (scanTimer) clearInterval(scanTimer); scanTimer = setInterval(tick, CFG.SCAN_EVERY_MIN * 60e3); }
 
-const S = { sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [] }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+const S = { sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
@@ -240,7 +240,7 @@ async function scan(fast) {
     for (const m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
       if (!(mins >= lo && mins <= hi)) continue;
-      if (a.held.has(m.event_ticker) || S.recentAlerts[m.ticker] || (S.recentAlerts['E:' + m.event_ticker] && Date.now() - S.recentAlerts['E:' + m.event_ticker] < 15 * 60e3)) continue;
+      if (a.held.has(m.event_ticker) || S.sc.ev[m.event_ticker]) continue; // ONE alert per market window, ever — next one only when a new window opens
       if (!cache[product]) cache[product] = await spotVol(product);
       const { spot, sig } = cache[product];
       const fl = num(m.floor_strike), cp = num(m.cap_strike), st = String(m.strike_type);
@@ -263,6 +263,7 @@ async function scan(fast) {
       }
     }
   }
+  for (const [k, v] of Object.entries(S.sc.ev)) if (v < Date.now() - 60e3) delete S.sc.ev[k];
   cands.sort((x, y) => y.edge - x.edge);
   const openBefore = S.sc.open.length;
   const used = new Set(); let sent = 0;
@@ -274,7 +275,7 @@ async function scan(fast) {
     while (count > 0 && count * c.ask + feeTotal(count, c.ask) > budget) count--;
     if (count < 1) continue;
     S.sc.open.push({ t: c.m.ticker, s: c.side[0], p: Math.round(c.p * 1000) / 1000, a: c.ask, c: Date.parse(c.m.close_time) }); if (S.sc.open.length > 25) S.sc.open.shift();
-    used.add(c.m.event_ticker); S.recentAlerts[c.m.ticker] = Date.now(); S.recentAlerts['E:' + c.m.event_ticker] = Date.now(); sent++;
+    used.add(c.m.event_ticker); S.recentAlerts[c.m.ticker] = Date.now(); S.sc.ev[c.m.event_ticker] = Date.parse(c.m.close_time); sent++;
     const cost = count * c.ask + feeTotal(count, c.ask);
     const coin = c.product.split('-')[0];
     const st = String(c.m.strike_type);
@@ -286,14 +287,14 @@ async function scan(fast) {
       `${coin} now ${money(c.spot)} · Today ${money(a.spent)}/${money(a.dayCap)} · Profit ${money(a.profit)}`;
     if (S.unlocked) {
       const r = await placeBuy({ ticker: c.m.ticker, side: c.side, count, price: c.ask });
-      remaining -= r.total; acctCache = null;
+      remaining -= r.total; acctCache = null; await saveSettings().catch(() => {});
       await say(`🤖 AUTO ${r.filled ? 'BOUGHT' : 'NOT FILLED'} ${r.filled}/${count}\n\n` + info);
     } else {
       const id = crypto.randomBytes(4).toString('hex');
       S.pending[id] = { ticker: c.m.ticker, side: c.side, price: c.ask, count, created: Date.now() };
       let okData = `o|${c.m.ticker}|${c.side[0]}|${Math.round(c.ask * 100)}|${count}`, noData = `x|${c.m.ticker}`;
       if (Buffer.byteLength(okData) > 64) { okData = `ok|${id}`; noData = `no|${id}`; }
-      if (S.sc.open.length !== openBefore) saveSettings().catch(() => {});
+      await saveSettings().catch(() => {}); // records this window as alerted before the message goes out
       await say(`🔔 TRADE IDEA — tap within ${CFG.ALERT_TTL_MIN} min\n\n` + info, {
         reply_markup: { inline_keyboard: [[{ text: `✅ Buy ${money(cost)}`, callback_data: okData }, { text: '❌ Skip', callback_data: noData }]] },
       });
