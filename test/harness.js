@@ -55,6 +55,7 @@ global.fetch = async (url, o = {}) => {
     return J({ price: String(px), time: new Date(W.now() - (W.stale.coinbase ? 120e3 : 1000)).toISOString() });
   }
   if (u.includes('api.kraken.com')) { if (W.down.kraken) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ result: { X: { c: [String(W[coin] * sh * (W.krakenSkew || 1))] } } }); }
+  if (u.includes('api.gemini.com')) { if (W.down.gemini) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ last: String(W[coin] * sh), volume: { timestamp: W.now() - (W.stale.gemini ? 120e3 : 0) } }); }
   if (u.includes('bitstamp.net')) { if (W.down.bitstamp) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ last: String(W[coin] * sh), timestamp: String(Math.floor(W.now() / 1000) - (W.stale.bitstamp ? 120 : 1)) }); }
   // ---- Kalshi ----
   if (u.includes('kalshi')) {
@@ -78,7 +79,7 @@ global.fetch = async (url, o = {}) => {
     }
     if (path.endsWith('/portfolio/orders')) return J({ error: { code: 'deprecated_v1_order_endpoint' } }, 410);
     if (path.endsWith('/portfolio/events/orders')) {
-      const m = W.markets[b.ticker];
+      const m = (W.live && W.live[b.ticker]) || W.markets[b.ticker];
       const yesPx = Number(b.price), count = Number(b.count);
       const costPer = b.side === 'bid' ? yesPx : 1 - yesPx;
       const idx = b.exchange_index ?? 0;
@@ -95,6 +96,11 @@ global.fetch = async (url, o = {}) => {
       W.positions.push({ ticker: b.ticker, position: b.side === 'bid' ? count : -count });
       return J({ order_id: 'o' + W.orders.length, fill_count: count.toFixed(2), remaining_count: '0.00', average_fill_price: fillYes.toFixed(4), average_fee_paid: (fee / count).toFixed(4), ts_ms: 1 }, 201);
     }
+    const ob = path.match(/\/markets\/([^/]+)\/orderbook$/);
+    if (ob) { const m = W.markets[ob[1]]; if (!m) return J({ error: 'not found' }, 404); const q = String(W.bookQty ?? 100);
+      if (W.listStale) { /* book is live even when the list is stale */ }
+      const live = (W.live && W.live[ob[1]]) || m;
+      return J({ orderbook_fp: { yes_dollars: [[Number(live.yes_bid_dollars).toFixed(4), q]], no_dollars: [[(1 - Number(live.yes_ask_dollars)).toFixed(4), q]] } }); }
     const mm = path.match(/\/markets\/([^/]+)$/);
     if (mm) return W.markets[mm[1]] ? J({ market: W.markets[mm[1]] }) : J({ error: 'not found' }, 404);
     if (path.endsWith('/markets')) {

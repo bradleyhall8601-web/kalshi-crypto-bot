@@ -71,7 +71,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(a && /BTC \$60,040\.00 or above/.test(a.text), 'alert sent for good hourly trade');
   ok(a && /incl\. \$0\.\d\d fee/.test(a.text), 'alert shows the fee');
   ok(a && /💰 Wallet \$7\.76 → \$\d/.test(a.text), 'alert shows wallet before/after');
-  ok(a && /📊 BTC 5m .* · price from 3 exchanges/.test(a.text), 'alert shows live BTC/ETH conditions');
+  ok(a && /📊 BTC 5m .* · price from 4 exchanges/.test(a.text), 'alert shows live BTC/ETH conditions');
   ok(a && Buffer.byteLength(btn(a)) <= 64, 'button data within Telegram 64-byte limit');
   const costShown = Number((a.text.match(/= \$(\d+\.\d\d)/) || [])[1]);
   ok(costShown <= 2.0, 'alert cost within $2 cap', costShown);
@@ -87,7 +87,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   const order = W.orders.slice(-1)[0] || {};
   ok(W.transfers.length === 1 && W.transfers[0].source_exchange_shard === 0 && W.transfers[0].destination_exchange_shard === 2, 'moved cash from shard 0 to the market shard 2');
   ok(order.side === 'bid' && order.exchange_index === 2 && order.time_in_force === 'immediate_or_cancel', 'YES buy sent as V2 bid on correct shard');
-  ok(/✅ BOUGHT \d+\/\d+ @ [\d.]+¢ for \$\d\.\d\d \(fees \$0\.\d\d\)/.test(edits().slice(-1)[0] || ''), 'receipt shows price, total and fees', edits().slice(-1)[0]);
+  ok(/🟢👆 BOUGHT \d+\/\d+ @ [\d.]+¢ = \$\d\.\d\d \(fee \$0\.\d\d\)/.test(edits().slice(-1)[0] || ''), 'receipt shows price, total and fees', edits().slice(-1)[0]);
   const worst = Number(order.count) * Number(order.price) + Math.ceil(0.07 * Number(order.count) * Number(order.price) * (1 - Number(order.price)) * 100) / 100;
   ok(worst <= 2.001, 'worst-case cost incl. fees ≤ $2 cap', worst);
 
@@ -103,7 +103,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(aNo && /BUY NO/.test(aNo.text), 'NO-side alert generated');
   await tap(post, btn(aNo)); await wait(2000);
   const oNo = W.orders.slice(-1)[0];
-  ok(oNo && oNo.side === 'ask' && Number(oNo.price) >= 1 - (Number(mNo.no_ask_dollars) + 0.0101) && Number(oNo.price) <= 1 - Number(mNo.no_ask_dollars) + 1e-9, 'NO buy sent as ask at 1 − limit (limit ≤ live NO ask + 1¢)', oNo && oNo.price);
+  ok(oNo && oNo.side === 'ask' && Number(oNo.price) >= 1 - (Number(mNo.no_ask_dollars) + 0.0201) && Number(oNo.price) <= 1 - Number(mNo.no_ask_dollars) + 1e-9, 'NO buy sent as ask at 1 − limit (limit ≤ live NO ask + 2¢ grace)', oNo && oNo.price);
   W.fills = W.fills.map(f => ({ ...f, fee_cost: undefined })); // even if Kalshi omitted fees, ledger keeps the true spend
   await send(post, '/status'); await wait(400);
   const spent2 = Number((lastMsg().text.match(/Today: \$(\d+\.\d\d)/) || [])[1]);
@@ -139,7 +139,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   W.shock = { coin: 'eth', pct: 0.02 };
   await tap(post, pTap); await wait(1500); ok(/Live re-check failed: .*ETH sudden spike/.test(edits().slice(-1)[0] || ''), 'ETH shock blocks a BTC Buy', edits().slice(-1)[0]);
   W.shock = null;
-  W.stale.coinbase = true; W.stale.bitstamp = true;
+  W.stale.coinbase = true; W.stale.bitstamp = true; W.stale.gemini = true;
   W.down.kraken = true;
   await tap(post, pTap); await wait(1500); ok(/Live re-check failed/.test(edits().slice(-1)[0] || ''), 'stale/missing prices block Buy', edits().slice(-1)[0]);
   W.stale = {}; W.down = {};
@@ -160,16 +160,16 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   mG.yes_ask_dollars = (Number(mG.yes_ask_dollars) + 0.02).toFixed(4);
   const oc = W.orders.length; W.shards = { 0: 7, 2: 0 };
   await tap(post, gTap); await wait(2500);
-  ok(W.orders.length === oc + 1 && /✅ BOUGHT/.test(edits().slice(-1)[0] || ''), 'small move that keeps the edge still buys at the live price', edits().slice(-1)[0]);
+  ok(W.orders.length === oc + 1 && /🟢👆 BOUGHT/.test(edits().slice(-1)[0] || ''), 'small move that keeps the edge still buys at the live price', edits().slice(-1)[0]);
   const lim = Number(W.orders.slice(-1)[0].price);
-  ok(lim <= Number(mG.yes_ask_dollars) + 0.0101, 'limit never more than 1¢ above live ask', lim);
+  ok(lim <= Number(mG.yes_ask_dollars) + 0.0201, 'tap limit never more than 2¢ above live ask', lim);
 
   console.log('\n10. Market-condition blocks at scan');
   clearMarkets();
   const cases = [
     ['sudden BTC drop', () => { W.shock = { coin: 'btc', pct: -0.02 }; }],
     ['exchanges disagree', () => { W.krakenSkew = 1.01; }],
-    ['only one exchange', () => { W.down.kraken = true; W.down.bitstamp = true; }],
+    ['only one exchange', () => { W.down.kraken = true; W.down.bitstamp = true; W.down.gemini = true; }],
     ['model vs market gap > 18 pts', () => {}, 0.25],
     ['thin market', () => {}, 0.16, { spread: 0.10 }],
     ['long shot under 15¢', () => {}, 0.16, { m: { yes_ask_dollars: '0.0800', yes_bid_dollars: '0.0600', no_ask_dollars: '0.9400' } }],
@@ -187,7 +187,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   const m15 = market('KXBTC15M', 'btc', 9, 59980, -0.17, { m: { strike_type: 'greater_or_equal' } });
   let o0 = W.orders.length;
   await send(post, '/scan'); await wait(2500);
-  ok(W.orders.length === o0 + 1 && msgs().some(m => /AUTO 15-MIN BOUGHT \d+\/\d+ NO @ [\d.]+¢ for \$\d\.\d\d \(fees \$0\.\d\d\)/.test(m.text)), 'auto buys a 15-min market with no tap, receipt in Telegram');
+  ok(W.orders.length === o0 + 1 && msgs().some(m => /🟢🤖 AUTO BUY · BTC 15-min/.test(m.text) && /🎟 \d+ NO \(⬇️ down\) @ [\d.]+¢ = \$\d\.\d\d \(fee \$0\.\d\d\)/.test(m.text)), 'auto buys a 15-min market with no tap, emoji receipt in Telegram');
   ok(!alerts().some(x => x.text.includes('59,980')), 'no tap alert for an auto-traded 15-min market');
   ok(msgs().some(m => /🔁 Moved \$\d\.\d\d .* shard 0 to shard 2/.test(m.text)), 'cash move between shards reported');
   const o15 = W.orders.slice(-1)[0];
@@ -197,9 +197,9 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   W.orderFill = 'none';
   market('KXETH15M', 'eth', 8, 1679.8, -0.17, { m: { strike_type: 'greater_or_equal' } });
   o0 = W.orders.length;
-  await send(post, '/scan'); await wait(1500); await send(post, '/scan'); await wait(1500);
-  ok(W.orders.length === o0 + 2, 'unfilled auto order retried while the window is open');
-  ok(msgs().filter(m => /AUTO order not filled/.test(m.text)).length === 1, '"not filled" reported once, not spammed');
+  await send(post, '/scan'); await wait(4500); await send(post, '/scan'); await wait(4500);
+  ok(W.orders.length === o0 + 6, 'unfilled auto order: 3 quick retries per check, keeps trying while the window is open', W.orders.length - o0);
+  ok(msgs().filter(m => /⏳ MISSED FILL/.test(m.text)).length === 1, '"missed fill" reported once, not spammed');
   W.orderFill = 'full'; clearMarkets();
   await send(post, '/set fastday 0'); await wait(200);
   market('KXBTC15M', 'btc', 9, 59985, -0.17, { m: { strike_type: 'greater_or_equal' } }); o0 = W.orders.length;
@@ -216,6 +216,39 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   await tap(post, btn(a15), 120); await wait(800); ok(/Too late/.test(edits().slice(-1)[0] || ''), '15-min tap alert expires after 90s');
   await send(post, '/auto15 on'); await wait(200); ok(/Auto 15-min trading ON/.test(lastMsg().text), '/auto15 on');
   clearMarkets();
+
+  console.log('\n11e. 15-min markets priced from the live order book');
+  clearMarkets(); W.shards = { 0: 7, 2: 0 };
+  const mL = market('KXBTC15M', 'btc', 9, 59978, -0.17, { m: { strike_type: 'greater_or_equal' } });
+  // list says one price, but the live book has moved: bot must use the live book
+  W.live = { [mL.ticker]: { ...mL, yes_ask_dollars: (Number(mL.yes_ask_dollars) - 0.01).toFixed(4), yes_bid_dollars: (Number(mL.yes_bid_dollars) - 0.01).toFixed(4) } };
+  mL.yes_ask_dollars = '0.9000'; mL.yes_bid_dollars = '0.8800'; mL.no_ask_dollars = '0.1200'; // stale list junk
+  let ol = W.orders.length;
+  await send(post, '/_fasttick'); await wait(2000);
+  const oL = W.orders.slice(-1)[0] || {};
+  const lb = Number(W.live[mL.ticker].yes_bid_dollars);
+  ok(W.orders.length === ol + 1 && oL.side === 'ask' && Number(oL.price) <= lb + 1e-9 && Number(oL.price) >= lb - 0.0301, 'order priced off the live book (within 3¢ grace), not the stale list', JSON.stringify(oL));
+  ok(msgs().filter(m => /🟢🤖 AUTO BUY · BTC 15-min/.test(m.text)).length >= 2, 'live-book order fills');
+  W.live = null; clearMarkets();
+  W.bookQty = 2; W.shards = { 0: 7, 2: 0 };
+  market('KXETH15M', 'eth', 9, 1679.7, -0.17, { m: { strike_type: 'greater_or_equal' } }); ol = W.orders.length;
+  await send(post, '/_fasttick'); await wait(2000);
+  ok(W.orders.length === ol + 1 && Number(W.orders.slice(-1)[0].count) <= 2, 'order size limited to contracts actually on offer');
+  W.bookQty = 100; clearMarkets();
+
+  console.log('\n11f. Grace: fills even when the price ticks up between check and order');
+  clearMarkets(); W.shards = { 0: 7, 2: 0 };
+  const mGr = market('KXETH15M', 'eth', 9, 1679.6, -0.17, { m: { strike_type: 'greater_or_equal' } });
+  W.live = { [mGr.ticker]: { ...mGr } };
+  W.liveDrift = { [mGr.ticker]: -0.02 };  // NO ask rises 2¢ right after the bot reads the book
+  ol = W.orders.length;
+  await send(post, '/_fasttick'); await wait(2500);
+  ok(W.orders.length === ol + 1 && msgs().some(m => /🟢🤖 AUTO BUY · ETH 15-min/.test(m.text)), 'grace window gets filled after a 2¢ move', W.orders.slice(ol).map(o => o.price).join(','));
+  W.live = null; W.liveDrift = null; clearMarkets();
+
+  console.log('\n11g. /report');
+  await send(post, '/report'); await wait(600);
+  ok(/📒 TODAY SO FAR/.test(lastMsg().text) && /🧾 Trades: \d+ \(🤖 auto \d+ · 👆 tap \d+\)/.test(lastMsg().text) && /💸 fees \$\d/.test(lastMsg().text), '/report shows trades, wins/losses, P&L, fees', lastMsg().text);
 
   console.log('\n11c. 15-min scanning never waits for the hourly scan');
   clearMarkets(); W.shards = { 0: 7, 2: 0 };
@@ -278,7 +311,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   await wait(21000); // account history refreshes every 20s
   await send(post, '/scan'); await wait(2500);
   ok(msgs().some(m => /Profit hit \$149\.50/.test(m.text)), 'auto-trading unlocks at +$100 (fees parsed as dollars)');
-  ok(W.orders.length === ordersBefore + 1 && msgs().some(m => /🤖 AUTO BOUGHT/.test(m.text)), 'auto mode places the trade itself');
+  ok(W.orders.length === ordersBefore + 1 && msgs().some(m => /🟢🤖 AUTO BUY · BTC hourly/.test(m.text)), 'auto mode places the trade itself');
   W.markets[mA.ticker].status = 'settled';
   market('KXETHD', 'eth', 40, 1677, 0.16); W.transferFails = true; W.shards = { 0: 50, 2: 0 };
   await send(post, '/scan'); await wait(2500);

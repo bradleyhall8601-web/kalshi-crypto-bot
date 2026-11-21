@@ -8,6 +8,6 @@
   },
   "scripts": {
     "start": "node server.js",
-    "test": "node test/run.js && node test/restart.js"
+    "test": "node test/run.js && node test/restart.js && node test/dayroll.js"
   }
 }

@@ -42,14 +42,14 @@ W.settlements = [
   ok(!msgs().some(m => /TRADE IDEA/.test(m) && /60,040/.test(m)), 'already-alerted window not re-alerted after restart');
   await send('/stats'); await wait(300);
   ok(/Settled: 1/.test(last()) && /actual: 100%/.test(last()) && /Paper profit: \+\$0\.48/.test(last()), 'scorecard graded the settled alert', last());
-  ok(msgs().some(m => /✅ WON \+\$15\.78 · KXBTCD-OLD-T60000 settled YES/.test(m)), 'new settlement reported with profit');
+  ok(msgs().some(m => /🏆 WIN \+\$15\.78 · BTC hourly ≥ \$60,000\.00 → YES/.test(m)), 'new settlement reported with profit');
   ok(!msgs().some(m => /KXBTCD-ANCIENT/.test(m)), 'old settlements not replayed after restart');
   ok(msgs().some(m => /🛑 Auto 15-min trading stopped for today: 4 losses in a row/.test(m)), 'auto 15-min circuit breaker trips after 4 straight losses');
   await send('/status'); await wait(500);
   ok(/Auto 15-min: STOPPED for today/.test(last()) && /result −\$6\.00/.test(last()), '/status shows stopped + day result', last());
   const blob = JSON.parse(W.pinned.slice(W.pinned.indexOf('{')));
   ok(blob.SC.n === 1 && blob.SC.open.length === 0 && blob.manualLock === true && blob.LED.fastOff === true, 'scorecard, lock and auto stop saved to pinned');
-  ok(msgs().some(m => /📈 Graded: KXBTCD-OLD-T60000 YES @ 50¢ would have WON/.test(m)), 'graded alert reported');
+  ok(msgs().some(m => /📝 Alert check · BTC hourly ≥ \$60,000\.00 YES @ 50¢ → ✅ right/.test(m)), 'graded alert reported');
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('TEST CRASH', e); process.exit(2); });

@@ -31,6 +31,8 @@ const CFG = {
   FAST_DAY: 10,       // max $ per day on auto 15-min trades (inside the overall daily limit)
   FAST_MAX_LOSS: 6,   // stop auto 15-min trading for the day after losing this much
   FAST_STREAK: 4,     // ...or after this many losses in a row
+  AUTO_GRACE: 0.03,   // auto may pay up to 3¢ above the live ask (only while the edge survives)
+  AUTO_TRIES: 3,      // re-read the live book and retry this many times within ~3 seconds
   MIN_PRICE: 0.15, MAX_PRICE: 0.85,
   MIN_MINUTES: 8, MAX_MINUTES: 70,
   VOL_MULT: Number(env.BOT_VOL_MULT || 1.0), // honest volatility; inflating it makes long shots look cheap
@@ -62,6 +64,7 @@ const SETTINGS = {
   auto15:   { key: 'AUTO_FAST', desc: 'auto-trade 15-min markets (1 = on, 0 = off)', min: 0, max: 1 },
   autoedge: { key: 'AUTO_EDGE', desc: 'min edge for auto 15-min trades (0.05 = 5¢)', min: 0.02, max: 0.5 },
   fastday:  { key: 'FAST_DAY', desc: 'max $ per day on auto 15-min trades', min: 0, max: 10000 },
+  grace:    { key: 'AUTO_GRACE', desc: 'auto: max ¢ above live ask to get filled (0.03 = 3¢)', min: 0, max: 0.1 },
   fastloss: { key: 'FAST_MAX_LOSS', desc: 'stop auto 15-min for the day after losing $ this much', min: 1, max: 10000 },
 };
 const COIN_SERIES = { BTC: ['KXBTCD', 'KXBTC15M'], ETH: ['KXETHD', 'KXETH15M'], SOL: ['KXSOLD', 'KXSOL15M'] };
@@ -103,8 +106,33 @@ async function loadSettings() {
 let scanTimer = null;
 function schedule() { if (scanTimer) clearInterval(scanTimer); if (env.BOT_TEST !== '1') scanTimer = setInterval(() => tick(false), CFG.SCAN_EVERY_MIN * 60e3); }
 
-const newLed = day => ({ day, spent: 0, fast: 0, autoPnl: 0, streak: 0, fastOff: false, auto: [] });
-const S = { stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+const newLed = day => ({ day, spent: 0, fast: 0, autoPnl: 0, streak: 0, fastOff: false, auto: [], n: 0, nAuto: 0, w: 0, l: 0, pnl: 0, fees: 0, best: 0, worst: 0 });
+// human label from a Kalshi ticker, e.g. KXBTC15M-26NOV211830-30 -> "BTC 15-min · 5:30 PM CT"
+function label(ticker) {
+  const [ser, ev, k] = String(ticker).split('-');
+  const coin = (ser.match(/KX(BTC|ETH|SOL)/) || [])[1] || ser;
+  const kind = /15M$/.test(ser) ? '15-min' : /D$/.test(ser) ? 'hourly' : '';
+  const tm = (ev || '').match(/^\d{2}[A-Z]{3}\d{2}(\d{2})(\d{2})?$/);
+  let when = '';
+  if (tm) { let h = (Number(tm[1]) + 23) % 24; const mm = tm[2] || '00'; when = `${h % 12 || 12}:${mm} ${h < 12 ? 'AM' : 'PM'} CT`; } // ticker time is ET
+  const strike = k && /^T[\d.]+$/.test(k) ? ` ≥ ${money(Math.ceil(Number(k.slice(1))))}` : '';
+  return `${coin} ${kind}${strike}${when ? ' · ' + when : ''}`.replace(/\s+/g, ' ').trim();
+}
+function dayReport(L, title) {
+  const settled = L.w + L.l;
+  return `📒 ${title}\n` +
+    `🧾 Trades: ${L.n} (🤖 auto ${L.nAuto} · 👆 tap ${L.n - L.nAuto})\n` +
+    `🏆 Wins ${L.w} · 💔 Losses ${L.l}${settled ? ` · ${Math.round(L.w / settled * 100)}% hit` : ''}\n` +
+    `${L.pnl >= 0 ? '📈' : '📉'} P&L ${L.pnl >= 0 ? '+' : ''}${money(L.pnl)} · 💸 fees ${money(L.fees)}\n` +
+    (settled ? `🥇 best ${L.best >= 0 ? '+' : ''}${money(L.best)} · 🥶 worst ${money(L.worst)}\n` : '') +
+    `📝 Scorecard ${S.sc.wins}/${S.sc.n} alerts right` + (acctCache ? `\n💰 Wallet ${money(acctCache.v.cash)}` : '');
+}
+async function rollDay(today) {
+  if (S.led.day === today) return;
+  if (S.led.day && (S.led.n || S.led.w || S.led.l)) await say(dayReport(S.led, 'DAILY REPORT (yesterday)'));
+  S.led = { ...newLed(today), auto: S.led.auto || [] };
+}
+const S = { lastCond: {}, stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
@@ -184,8 +212,12 @@ async function accountRaw() {
   if (!(S.setlTs > 0)) S.setlTs = Math.max(Date.now(), ...settles.map(stime)); // first boot: don't replay history
   const fresh = settles.filter(x => stime(x) > S.setlTs).sort((x, y) => stime(x) - stime(y));
   for (const x of fresh) {
-    const pl = pnlOf(x), res = String(x.market_result || x.result || '').toUpperCase();
-    await say(`${pl >= 0 ? '✅ WON' : '❌ LOST'} ${pl >= 0 ? '+' : '−'}${money(Math.abs(pl))} · ${x.ticker || x.market_ticker}${res ? ` settled ${res}` : ''}\nPaid out ${money(d(x, 'revenue') || 0)} · Profit since start ${money(profit)}`);
+    const pl = pnlOf(x), res = String(x.market_result || x.result || '').toUpperCase(), tk = x.ticker || x.market_ticker;
+    await rollDay(String(startOfTodayCT()));
+    if (pl >= 0) S.led.w++; else S.led.l++;
+    S.led.pnl = Math.round((S.led.pnl + pl) * 100) / 100; S.led.best = Math.max(S.led.best, pl); S.led.worst = Math.min(S.led.worst, pl);
+    await say(`${pl >= 0 ? '🏆 WIN' : '💔 LOSS'} ${pl >= 0 ? '+' : ''}${money(pl)} · ${label(tk)}${res ? ` → ${res}` : ''}\n` +
+      `📊 Today ${S.led.w}W·${S.led.l}L ${S.led.pnl >= 0 ? '+' : ''}${money(S.led.pnl)} · all-time ${profit >= 0 ? '+' : ''}${money(profit)}`);
   }
   if (fresh.length) { S.setlTs = stime(fresh[fresh.length - 1]); saveSettings().catch(() => {}); }
   // today's spend = buys filled since midnight CT
@@ -202,7 +234,7 @@ async function accountRaw() {
     if (px === px) fillSpent += cnt(f) * px + (fee === fee ? fee : feeTotal(cnt(f), px));
   }
   const today = String(startOfTodayCT());
-  if (S.led.day !== today) S.led = { ...newLed(today), auto: S.led.auto || [] };
+  await rollDay(today);
   const spent = Math.max(fillSpent, S.led.spent); // never under-count
   // events we already hold
   const pos = await kalshi('GET', '/portfolio/positions?count_filter=position&limit=1000');
@@ -240,14 +272,31 @@ async function ensureShardFunds(idx, needed) {
 }
 
 // Kalshi V2 orders: one YES leg. Buy YES = bid at p. Buy NO at p = ask (sell YES) at 1-p.
+// Live order book: the market list can lag seconds behind on fast 15-min markets, so price from the book itself.
+async function withLiveQuote(m) {
+  const r = await kalshi('GET', `/markets/${m.ticker}/orderbook?depth=20`);
+  const ob = r.orderbook_fp || {}, lv = a => (a || []).map(x => [Number(x[0]), Number(x[1])]).filter(x => x[0] > 0 && x[1] > 0);
+  const yes = lv(ob.yes_dollars), no = lv(ob.no_dollars);
+  const yBid = yes.length ? Math.max(...yes.map(x => x[0])) : NaN, nBid = no.length ? Math.max(...no.map(x => x[0])) : NaN;
+  const live = { ...m, _book: { yes, no }, _live: true,
+    yes_ask_dollars: nBid > 0 ? (1 - nBid).toFixed(4) : null, no_ask_dollars: yBid > 0 ? (1 - yBid).toFixed(4) : null,
+    yes_bid_dollars: yBid > 0 ? yBid.toFixed(4) : null };
+  return live;
+}
+// contracts available to BUY on a side at or below a price (YES asks come from NO bids, and vice versa)
+function bookDepth(m, side, limit) {
+  if (!m._book) return Infinity;
+  const opp = side === 'yes' ? m._book.no : m._book.yes;
+  return opp.filter(([px]) => 1 - px <= limit + 1e-9).reduce((a, x) => a + x[1], 0);
+}
 // highest price worth paying: up to 1¢ above the ask, but only while the edge after fees stays >= need
-function bestLimit(p, ask, need) {
+function bestLimit(p, ask, need, grace = 0.01) {
   const feePer = q => 0.07 * q * (1 - q) + 0.005;
-  let limit = Math.min(0.99, Math.round((ask + 0.01) * 1000) / 1000);
+  let limit = Math.min(0.99, Math.round((ask + grace) * 1000) / 1000);
   while (limit > ask && limit + feePer(limit) > p - need) limit = Math.round((limit - 0.001) * 1000) / 1000;
   return ask + feePer(ask) > p - need ? null : limit;
 }
-async function placeBuy({ ticker, side, count, price }) {
+async function placeBuy({ ticker, side, count, price, auto = false }) {
   const m = (await kalshi('GET', `/markets/${ticker}`)).market || {};
   const idx = Number.isInteger(m.exchange_index) ? m.exchange_index : 0;
   await ensureShardFunds(idx, count * price + feeTotal(count, price) + 0.02);
@@ -266,8 +315,8 @@ async function placeBuy({ ticker, side, count, price }) {
   const px = avgYes === avgYes ? (side === 'yes' ? avgYes : 1 - avgYes) : price;
   const fees = num(o.average_fee_paid) === num(o.average_fee_paid) ? num(o.average_fee_paid) * filled : feeTotal(filled, px);
   const total = filled * px + fees;
-  const today = String(startOfTodayCT()); if (S.led.day !== today) S.led = { ...newLed(today), auto: S.led.auto || [] };
-  S.led.spent += total; await saveSettings().catch(() => {});
+  await rollDay(String(startOfTodayCT()));
+  S.led.spent += total; if (filled > 0) { S.led.n++; if (auto) S.led.nAuto++; S.led.fees += fees; } await saveSettings().catch(() => {});
   return { filled, total, fees, px };
 }
 
@@ -284,6 +333,7 @@ async function exchangePrices(product) {
     req(`https://api.exchange.coinbase.com/products/${product}/ticker`, { headers: H }).then(t => ({ src: 'coinbase', px: Number(t.price), at: Date.parse(t.time) })),
     req(`https://api.kraken.com/0/public/Ticker?pair=${kr}`, { headers: H }).then(t => { const k = Object.values(t.result || {})[0]; return { src: 'kraken', px: Number(k && k.c && k.c[0]), at: Date.now() }; }),
     req(`https://www.bitstamp.net/api/v2/ticker/${bs}/`, { headers: H }).then(t => ({ src: 'bitstamp', px: Number(t.last), at: Number(t.timestamp) * 1000 })),
+    req(`https://api.gemini.com/v1/pubticker/${bs}`, { headers: H }).then(t => ({ src: 'gemini', px: Number(t.last), at: Number(t.volume && t.volume.timestamp) || Date.now() })),
   ]);
   return tries.filter(x => x.status === 'fulfilled' && x.value.px > 0).map(x => x.value);
 }
@@ -298,8 +348,9 @@ async function coinState(product) {
   ]);
   const candles = c.slice().reverse(); // oldest -> newest: [time, low, high, open, close, vol]
   const r = []; for (let i = 1; i < candles.length; i++) r.push(Math.log(candles[i][4] / candles[i - 1][4]));
-  const pxs = prices.map(x => x.px).sort((a, b) => a - b);
-  const spot = pxs.length ? pxs[Math.floor(pxs.length / 2)] : NaN; // median across exchanges
+  const freshP = prices.filter(x => !(x.at > 0) || Date.now() - x.at < 30e3); // stale exchanges are dropped, not averaged in
+  const pxs = (freshP.length ? freshP : prices).map(x => x.px).sort((a, b) => a - b);
+  const spot = !pxs.length ? NaN : pxs.length % 2 ? pxs[(pxs.length - 1) / 2] : (pxs[pxs.length / 2 - 1] + pxs[pxs.length / 2]) / 2; // median across exchanges
   const sig1h = sd(r.slice(-60)), sig5h = sd(r.slice(-300)), sig15 = sd(r.slice(-15));
   const sig = Math.sqrt((sig1h * sig1h + sig5h * sig5h) / 2) * CFG.VOL_MULT; // blend, not max (max overstates swings)
   const nowS = Date.now() / 1000;
@@ -308,7 +359,7 @@ async function coinState(product) {
   const ret = n => Math.log(spot / pxAgo(n));
   const freshest = Math.max(...prices.map(x => x.at || 0));
   const st = {
-    product, spot, sig, sig15, sig5h, sources: prices.map(x => x.src),
+    product, spot, sig, sig15, sig5h, sources: freshP.map(x => x.src),
     r5: ret(5), r15: ret(15),
     ageSec: Math.max(0, Math.round((Date.now() - freshest) / 1000)),
     candleLagSec: Math.round(nowS - candles[candles.length - 1][0]),
@@ -317,7 +368,7 @@ async function coinState(product) {
   st.z5 = st.r5 / (sig * Math.sqrt(5)); st.z15 = st.r15 / (sig * Math.sqrt(15));
   st.problems = [];
   if (!(spot > 0) || r.length < 100) st.problems.push('price data missing');
-  if (prices.length < 2) st.problems.push(`only ${prices.length} exchange price${prices.length === 1 ? '' : 's'} available`);
+  if (freshP.length < 2) st.problems.push(`only ${freshP.length} live exchange price${freshP.length === 1 ? '' : 's'} available`);
   if (st.ageSec > 30) st.problems.push(`live price ${st.ageSec}s old`);
   if (st.candleLagSec > 600) st.problems.push(`price history ${Math.round(st.candleLagSec / 60)} min behind`);
   if (st.spreadPct > 0.002) st.problems.push(`exchanges disagree ${(st.spreadPct * 100).toFixed(2)}%`);
@@ -390,6 +441,7 @@ async function scan(fast) {
   if (remaining < 0.5) return;
 
   const cond = await marketConditions(), cands = [];
+  S.lastCond = cond;
   for (const series of CFG.SERIES.filter(x => isFast(x) === !!fast)) {
     const product = CFG.SPOT[series]; if (!product || !cond[product]) continue;
     const lo = isFast(series) ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES, hi = isFast(series) ? CFG.FAST_MAX_MINUTES : CFG.MAX_MINUTES;
@@ -409,11 +461,12 @@ async function scan(fast) {
     if (cond[product].problems.length && isFast(series)) S.stats.last15[series] = { blocked: cond[product].problems.join('; '), at: Date.now() };
     if (cond[product].problems.length) { if (env.BOT_DEBUG === '1') log('COND', product, cond[product].problems.join('; '));
       if (!S.condWarn || Date.now() - S.condWarn > 15 * 60e3) { S.condWarn = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; ')); } continue; }
-    for (const m of markets) {
+    for (let m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
       if (!(mins >= lo && mins <= hi)) continue;
       if (a.held.has(m.event_ticker) || S.sc.ev[m.event_ticker]) { if (isFast(series)) S.stats.last15[series] = { t: m.ticker, done: true, mins, at: Date.now() }; continue; } // ONE trade per window
       if (isFast(series)) {
+        try { m = await withLiveQuote(m); } catch (e) { log('orderbook failed', m.ticker, e.message); }
         const vs = evaluate(m, cond[product], now), best = vs.slice().sort((x, y) => y.edge - x.edge)[0];
         if (best) S.stats.last15[series] = { t: m.ticker, side: best.side, raw: best.raw, mkt: best.mkt, p: best.p, ask: best.ask, edge: best.edge, mins, reasons: best.reasons.concat(best.edge < CFG.AUTO_EDGE && CFG.AUTO_FAST === 1 && best.ok ? [`edge ${(best.edge * 100).toFixed(1)}¢ below auto bar ${(CFG.AUTO_EDGE * 100).toFixed(0)}¢`] : []), at: Date.now() };
       }
@@ -434,7 +487,7 @@ async function scan(fast) {
     let limit = null;
     if (autoFast && !S.unlocked) {
       if (c.edge < CFG.AUTO_EDGE) continue;                       // auto needs the bigger edge
-      limit = bestLimit(c.p, c.ask, CFG.AUTO_EDGE / 2); if (limit === null) continue;
+      limit = bestLimit(c.p, c.ask, CFG.AUTO_EDGE / 2, CFG.AUTO_GRACE); if (limit === null) continue;
     }
     // size within: per-trade cap, today's remaining budget, AND the cash actually in the wallet (fees + slippage included)
     const worst = limit || Math.min(c.ask + CFG.MAX_SLIPPAGE, 0.99);
@@ -442,6 +495,7 @@ async function scan(fast) {
     const budget = Math.min(a.tradeCap, remaining, a.cash - 0.02, fastLeft);
     let count = Math.floor(budget / worst);
     while (count > 0 && count * worst + feeTotal(count, worst) > budget) count--;
+    if (auto) { const depth = bookDepth(c.m, c.side, worst); if (depth < count) count = Math.floor(depth); if (count < 1 && c.m._book) { log('no liquidity', c.m.ticker, c.side, worst); continue; } }
     if (env.BOT_DEBUG === '1') log('SIZE', c.m.ticker, JSON.stringify({ cap: a.tradeCap, remaining, cash: a.cash, worst, count }));
     if (count < 1) { if (a.cash < 1 && !S.lowCashWarned) { S.lowCashWarned = Date.now(); await say(`💸 Wallet is low (${money(a.cash)}). Trade ideas paused until you add funds on Kalshi.`); } continue; }
     S.sc.open.push({ t: c.m.ticker, s: c.side[0], p: Math.round(c.p * 1000) / 1000, a: c.ask, c: Date.parse(c.m.close_time) }); if (S.sc.open.length > 25) S.sc.open.shift();
@@ -458,16 +512,32 @@ async function scan(fast) {
     if (auto) {
       const unmark = () => { delete S.sc.ev[c.m.event_ticker]; S.sc.open = S.sc.open.filter(o => o.t !== c.m.ticker); }; // nothing bought: window stays open for a later try
       try {
-        const r = await placeBuy({ ticker: c.m.ticker, side: c.side, count, price: limit || c.ask });
+        let r = await placeBuy({ ticker: c.m.ticker, side: c.side, count, price: limit || c.ask, auto: true });
+        // grace: if the price ran, re-read the live book and try again while the edge still holds
+        for (let k = 1; r.filled === 0 && autoFast && k < CFG.AUTO_TRIES; k++) {
+          await new Promise(res => setTimeout(res, 700));
+          let live; try { live = await withLiveQuote(c.m); } catch (e) { break; }
+          const v = evaluate(live, S.lastCond[c.product]).find(x => x.side === c.side);
+          if (!v || v.reasons.some(x => !/^edge .* below/.test(x)) || v.edge < CFG.MIN_EDGE) { log('retry stop', c.m.ticker, v && v.edge); break; }
+          const lim = bestLimit(v.p, v.ask, CFG.AUTO_EDGE / 2, CFG.AUTO_GRACE); if (lim === null) break;
+          let n = Math.min(count, Math.floor(bookDepth(live, c.side, lim)));
+          while (n > 0 && n * lim + feeTotal(n, lim) > budget) n--;
+          if (n < 1) break;
+          log('retry', k, c.m.ticker, lim, n);
+          r = await placeBuy({ ticker: c.m.ticker, side: c.side, count: n, price: lim, auto: true });
+        }
         remaining -= r.total; a.cash -= r.total; acctCache = null;
         if (r.filled > 0) {
           if (fastSeries) { S.led.fast = (S.led.fast || 0) + r.total; S.led.auto.push({ t: c.m.ticker, s: c.side[0], n: r.filled, cost: Math.round(r.total * 100) / 100, c: Date.parse(c.m.close_time) }); if (S.led.auto.length > 30) S.led.auto.shift(); }
           await saveSettings().catch(() => {});
-          await say(`🤖 AUTO${fastSeries ? ' 15-MIN' : ''} BOUGHT ${r.filled}/${count} ${c.side.toUpperCase()} @ ${cents(r.px)} for ${money(r.total)} (fees ${money(r.fees)})\n` +
-            `Auto 15-min today: spent ${money(S.led.fast || 0)}/${money(CFG.FAST_DAY)} · result ${S.led.autoPnl >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\n\n` + info);
+          await say(`🟢🤖 AUTO BUY · ${label(c.m.ticker)}\n` +
+            `🎟 ${r.filled} ${c.side.toUpperCase()}${fastSeries ? (c.side === 'yes' ? ' (⬆️ up)' : ' (⬇️ down)') : ''} @ ${cents(r.px)} = ${money(r.total)} (fee ${money(r.fees)})\n` +
+            `🎯 Win chance ${Math.round(c.p * 100)}% vs price ${cents(c.ask)} · edge +${(c.edge * 100).toFixed(1)}¢\n` +
+            `✅ Win pays ${money(r.filled)} (+${money(r.filled - r.total)}) · ❌ lose −${money(r.total)}\n` +
+            `💰 Wallet ≈ ${money(a.cash)} · 🤖 auto today ${money(S.led.fast || 0)}/${money(CFG.FAST_DAY)}\n📊 ${c.cond}`);
         } else {
           unmark(); log('auto not filled', c.m.ticker);
-          S.nf = S.nf || {}; if (!S.nf[c.m.event_ticker]) { S.nf[c.m.event_ticker] = 1; await say(`⏳ AUTO order not filled (price moved before it executed). No money spent — will retry this window if the edge returns.\n\n` + info); }
+          S.nf = S.nf || {}; if (!S.nf[c.m.event_ticker]) { S.nf[c.m.event_ticker] = 1; await say(`⏳ MISSED FILL · ${label(c.m.ticker)} ${c.side.toUpperCase()}\nPrice ran past the bot's max (${cents(Math.min(0.99, c.ask + CFG.AUTO_GRACE))}) on ${CFG.AUTO_TRIES} tries. 💵 No money spent — it keeps watching this window.`); }
         }
       } catch (e) { unmark(); log('auto order failed', e.message); await say(`⚠️ AUTO order failed: ${e.message.replace(/^.*?-> /, '').slice(0, 200)}\n\n` + info); }
     } else {
@@ -491,7 +561,7 @@ async function applySetting(name, raw) {
     CFG.SERIES = list; await saveSettings(); return '✅ coins = ' + String(raw).toUpperCase();
   }
   const x = SETTINGS[name]; let v = Number(String(raw ?? '').replace(/[$%¢]/g, ''));
-  if (['edge', 'autoedge', 'minprice', 'maxprice', 'autotrade', 'autoday'].includes(name) && v >= 1 && v <= 100) v = v / 100; // /set edge 8 = 8¢
+  if (['edge', 'autoedge', 'grace', 'minprice', 'maxprice', 'autotrade', 'autoday'].includes(name) && v >= 1 && v <= 100) v = v / 100; // /set edge 8 = 8¢
   if (!x || !(v === v)) return 'Usage: /set <name> <value>\nExample: /set trade 3\nSee /help for names.';
   if (v < x.min || v > x.max) return `❌ ${name} must be between ${x.min} and ${x.max}.`;
   const old = CFG[x.key]; CFG[x.key] = v;
@@ -624,7 +694,8 @@ async function onUpdate(u) {
     await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Placing order…' });
     if (Date.now() - p.created > ttlFor(p.ticker) * 60e3 + 5000) return done('Expired', '⌛ Too late — price may have moved.');
     const a = await account(true);
-    const m = (await kalshi('GET', `/markets/${p.ticker}`)).market || {};
+    let m = (await kalshi('GET', `/markets/${p.ticker}`)).market || {};
+    try { if (m.ticker) m = await withLiveQuote(m); } catch (e) { log('orderbook failed', p.ticker, e.message); }
     const ask = d(m, p.side + '_ask');
     if (!(ask > 0 && ask < 1)) return done('Market closed', '⏹ Market no longer tradable. Not bought.');
     // re-analyze BTC + ETH and this market right now, at TODAY'S price (not the alert's)
@@ -641,12 +712,13 @@ async function onUpdate(u) {
     const other = v.reasons.filter(r => !/^edge .* below|^price .* outside/.test(r));
     if (other.length) return done('Not bought — conditions changed', `🛑 Live re-check failed: ${other.join('; ')}. Not bought.`);
     // limit: up to 1¢ above the live ask, but never past the price where the edge disappears
-    let limit = Math.min(0.99, ask + 0.01);
+    let limit = Math.min(0.99, ask + 0.02);
     while (limit > ask && limit + feePer(limit) > fairMax) limit = Math.round((limit - 0.001) * 1000) / 1000;
     // worst-case cost (price can tick up to the limit) must fit the per-trade cap, today's budget and the wallet
     const worstCost = n => n * limit + feeTotal(n, limit);
     const room = Math.min(a.tradeCap, a.dayCap - a.spent, a.cash - 0.02);
-    let count = p.count;
+    let count = Math.min(p.count, Math.floor(bookDepth(m, p.side, limit)));
+    if (count < 1) return done('No sellers', `⚠️ Nobody is selling ${p.side.toUpperCase()} at ${cents(limit)} or less right now. Not bought, no money spent.`);
     while (count > 0 && worstCost(count) > room + 0.001) count--;
     if (count < 1) {
       if (a.dayCap - a.spent < worstCost(1)) return done('Daily limit hit', `🛑 Daily limit reached: spent ${money(a.spent)} of ${money(a.dayCap)} today.`);
@@ -654,7 +726,7 @@ async function onUpdate(u) {
     }
     const r = await placeBuy({ ticker: p.ticker, side: p.side, count, price: limit }); acctCache = null;
     return done(r.filled ? 'Bought!' : 'Not filled', r.filled
-      ? `✅ BOUGHT ${r.filled}/${count} @ ${cents(r.px)} for ${money(r.total)} (fees ${money(r.fees)}) · wallet ≈ ${money(a.cash - r.total)}`
+      ? `🟢👆 BOUGHT ${r.filled}/${count} @ ${cents(r.px)} = ${money(r.total)} (fee ${money(r.fees)}) · 💰 wallet ≈ ${money(a.cash - r.total)}`
       : '⚠️ Not filled — nobody was selling at that price. No money spent.');
   }
   const msg = u.message; if (!msg || typeof msg.text !== 'string') return;
@@ -668,6 +740,7 @@ async function onUpdate(u) {
   if (t.startsWith('/lock')) { S.unlocked = false; S.manualLock = true; await saveSettings(); return say(`🔒 Confirm mode locked. /auto to allow auto-trading at +$${CFG.UNLOCK_PROFIT} again.`); }
   if (/^\/auto(@\w+)?$/.test(t)) { S.manualLock = false; await saveSettings(); return say(`Auto-trading will turn on at +$${CFG.UNLOCK_PROFIT} profit.`); }
   if (env.BOT_TEST === '1' && t === '/_fasttick') { await tick(true); return; }
+  if (t.startsWith('/report')) { try { await account(true); } catch (e) {} await rollDay(String(startOfTodayCT())); return say(dayReport(S.led, 'TODAY SO FAR')); }
   if (t.startsWith('/why')) {
     const st = S.stats, f5 = st.fast.filter(x => Date.now() - x < 5 * 60e3).length;
     const lines = [`🔍 Live check — 15-min scans in last 5 min: ${f5} ${f5 >= 25 ? '✅' : '⚠️'} (target 30) · auto 15-min ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED today' : 'ON'}`];
@@ -693,7 +766,7 @@ async function onUpdate(u) {
     return say(`📈 Scorecard (every alert, 1 contract each)\nSettled: ${n} · waiting: ${c.open.length}\nBot predicted wins: ${(c.sumP / n * 100).toFixed(0)}% · actual: ${(c.wins / n * 100).toFixed(0)}%\nPaper profit: ${c.pnl >= 0 ? '+' : '−'}${money(Math.abs(c.pnl))} (${(c.pnl / n * 100).toFixed(1)}¢ per alert)\nAccuracy score (Brier, lower is better): ${(c.brier / n).toFixed(3)}\n${n < 50 ? 'Under 50 results is mostly luck — judge it after 50+.' : ''}`);
   }
   if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins btc,eth,sol');
-  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol');
+  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol');
   if (t.startsWith('/set')) { const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
   if (t.startsWith('/rollback')) return rollback();
   if (t.startsWith('/claude') || !t.startsWith('/')) {
@@ -730,7 +803,7 @@ http.createServer((rq, rs) => {
     { command: 'claude', description: 'Talk to Claude / ask for changes' }, { command: 'status', description: 'Money, profit & mode' },
     { command: 'stats', description: 'Prediction scorecard' }, { command: 'settings', description: 'See all settings' }, { command: 'set', description: 'Change a setting: /set trade 3' },
     { command: 'scan', description: 'Scan for trades now' }, { command: 'pause', description: 'Stop trading' }, { command: 'resume', description: 'Start again' },
-    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'why', description: 'Why it is/isn\'t trading 15-min now' }, { command: 'rollback', description: 'Undo last code change' },
+    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'report', description: 'Today: trades, wins, losses, P&L' }, { command: 'why', description: 'Why it is/isn\'t trading 15-min now' }, { command: 'rollback', description: 'Undo last code change' },
     { command: 'help', description: 'All commands' }] });
   await loadSettings(); schedule();
   try { const me = await tg('getMe', {}); log('SELFCHECK telegram', me.ok ? 'OK @' + me.result.username : 'FAILED'); } catch (e) { log('SELFCHECK telegram FAILED', e.message); }
@@ -808,7 +881,7 @@ async function scoreAlerts() {
     const win = (o.s === 'y' ? 'yes' : 'no') === res ? 1 : 0;
     S.sc.n++; S.sc.wins += win; S.sc.sumP += o.p; S.sc.brier += (o.p - win) ** 2;
     S.sc.pnl += win - o.a - 0.07 * o.a * (1 - o.a); // per 1 contract, after fee
-    await say(`📈 Graded: ${o.t} ${o.s === 'y' ? 'YES' : 'NO'} @ ${cents(o.a)} would have ${win ? 'WON' : 'LOST'} (bot gave it ${Math.round(o.p * 100)}%). Scorecard: ${S.sc.wins}/${S.sc.n} right · paper ${S.sc.pnl >= 0 ? '+' : '−'}${money(Math.abs(S.sc.pnl))}/contract`);
+    await say(`📝 Alert check · ${label(o.t)} ${o.s === 'y' ? 'YES' : 'NO'} @ ${cents(o.a)} → ${win ? '✅ right' : '❌ wrong'} (bot said ${Math.round(o.p * 100)}%) · scorecard ${S.sc.wins}/${S.sc.n}`);
     S.sc.open = S.sc.open.filter(x => x !== o); changed = true;
   }
   if (changed) await saveSettings();
