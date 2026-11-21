@@ -461,6 +461,14 @@ http.createServer((rq, rs) => {
     log('SELFCHECK kalshi FAILED', e.message);
     if (/INCORRECT_API_KEY_SIGNATURE/.test(e.message) && env.KEY_REPAIR === '1') await repairKey();
   }
+  if (env.ORDER_SELFTEST === '1') { // $0 test: 1-contract YES bid at 1¢, immediate-or-cancel, cannot fill at a fair price
+    try {
+      const ms = await kalshi('GET', '/markets?series_ticker=KXBTC15M&status=open&limit=5');
+      const m = (ms.markets || [])[0];
+      const o = await kalshi('POST', '/portfolio/events/orders', { ticker: m.ticker, side: 'bid', count: '1.00', price: '0.0100', time_in_force: 'immediate_or_cancel', self_trade_prevention_type: 'taker_at_cross', client_order_id: 'kbot-selftest-' + Date.now() });
+      log('ORDERTEST OK', m.ticker, JSON.stringify(o));
+    } catch (e) { log('ORDERTEST FAILED', e.message); }
+  }
   if (OWNER) say(`🟢 Bot running (version ${VERSION}). Send /help anytime.`);
 });
 
