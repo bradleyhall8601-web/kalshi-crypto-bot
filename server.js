@@ -23,7 +23,8 @@ const CFG = {
   SERIES: (env.BOT_SERIES || 'KXBTCD,KXETHD,KXBTC15M,KXETH15M').split(',').map(s => s.trim()).filter(Boolean),
   SPOT: { KXBTCD: 'BTC-USD', KXBTC: 'BTC-USD', KXBTC15M: 'BTC-USD', KXETHD: 'ETH-USD', KXETH: 'ETH-USD', KXETH15M: 'ETH-USD', KXSOLD: 'SOL-USD', KXSOL15M: 'SOL-USD' },
   FAST_MIN_MINUTES: 2, FAST_MAX_MINUTES: 15, // 15-minute markets: trade while 2-15 min remain
-  MIN_EDGE: Number(env.BOT_MIN_EDGE || 0.04), MAX_EDGE: 0.25,
+  MIN_EDGE: Number(env.BOT_MIN_EDGE || 0.04), MAX_EDGE: 0.25, MAX_DISAGREE: 0.18,
+  FAST_TTL_MIN: 1.5, // 15-min markets move in seconds: alerts expire fast
   MIN_PRICE: 0.15, MAX_PRICE: 0.85,
   MIN_MINUTES: 8, MAX_MINUTES: 70,
   VOL_MULT: Number(env.BOT_VOL_MULT || 1.0), // honest volatility; inflating it makes long shots look cheap
@@ -55,6 +56,7 @@ const SETTINGS = {
 };
 const COIN_SERIES = { BTC: ['KXBTCD', 'KXBTC15M'], ETH: ['KXETHD', 'KXETH15M'], SOL: ['KXSOLD', 'KXSOL15M'] };
 const isFast = s => /15M$/.test(s);
+const ttlFor = ticker => isFast(String(ticker).split('-')[0]) ? CFG.FAST_TTL_MIN : CFG.ALERT_TTL_MIN;
 let pinnedId = null;
 function settingsText() { return Object.entries(SETTINGS).map(([n, x]) => `${n} = ${CFG[x.key]}`).join('\n') + `\nmarkets = ${CFG.SERIES.join(', ')}`; }
 async function saveSettings() {
@@ -211,31 +213,52 @@ function normCdf(x) { const t = 1 / (1 + 0.2316419 * Math.abs(x)); const k = 0.3
 function probAbove(Sp, K, sig, T) { if (!(K > 0)) return NaN; const s = sig * Math.sqrt(Math.max(T, 0.5)); return normCdf((Math.log(Sp / K) - 0.5 * s * s) / s); }
 const sd = a => { const m = a.reduce((x, y) => x + y, 0) / a.length; return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / (a.length - 1)); };
 // Live read of BTC and ETH before every trade: price, momentum, volatility regime, data freshness.
+// Kalshi settles on CF Benchmarks' index, which blends several exchanges — so we do too.
+async function exchangePrices(product) {
+  const coin = product.split('-')[0], H = { 'User-Agent': 'kalshi-bot' };
+  const kr = { BTC: 'XBTUSD', ETH: 'ETHUSD' }[coin], bs = coin.toLowerCase() + 'usd';
+  const tries = await Promise.allSettled([
+    req(`https://api.exchange.coinbase.com/products/${product}/ticker`, { headers: H }).then(t => ({ src: 'coinbase', px: Number(t.price), at: Date.parse(t.time) })),
+    req(`https://api.kraken.com/0/public/Ticker?pair=${kr}`, { headers: H }).then(t => { const k = Object.values(t.result || {})[0]; return { src: 'kraken', px: Number(k && k.c && k.c[0]), at: Date.now() }; }),
+    req(`https://www.bitstamp.net/api/v2/ticker/${bs}/`, { headers: H }).then(t => ({ src: 'bitstamp', px: Number(t.last), at: Number(t.timestamp) * 1000 })),
+  ]);
+  return tries.filter(x => x.status === 'fulfilled' && x.value.px > 0).map(x => x.value);
+}
+
+// Live read of one coin: fair price across exchanges, momentum, volatility regime, data freshness.
 async function coinState(product) {
   const H = { 'User-Agent': 'kalshi-bot' };
-  const [t, c] = await Promise.all([
-    req(`https://api.exchange.coinbase.com/products/${product}/ticker`, { headers: H }),
+  const [prices, c] = await Promise.all([
+    exchangePrices(product),
     req(`https://api.exchange.coinbase.com/products/${product}/candles?granularity=60`, { headers: H }),
   ]);
-  const closes = c.map(x => x[4]).reverse(), r = [];
-  for (let i = 1; i < closes.length; i++) r.push(Math.log(closes[i] / closes[i - 1]));
-  const spot = Number(t.price), last = closes[closes.length - 1];
+  const candles = c.slice().reverse(); // oldest -> newest: [time, low, high, open, close, vol]
+  const r = []; for (let i = 1; i < candles.length; i++) r.push(Math.log(candles[i][4] / candles[i - 1][4]));
+  const pxs = prices.map(x => x.px).sort((a, b) => a - b);
+  const spot = pxs.length ? pxs[Math.floor(pxs.length / 2)] : NaN; // median across exchanges
   const sig1h = sd(r.slice(-60)), sig5h = sd(r.slice(-300)), sig15 = sd(r.slice(-15));
   const sig = Math.max(sig1h, sig5h) * CFG.VOL_MULT;
-  const ret = n => Math.log(spot / closes[closes.length - 1 - n]);
+  const nowS = Date.now() / 1000;
+  // price N minutes ago, looked up by timestamp (candles can lag a couple of minutes)
+  const pxAgo = n => { const target = nowS - n * 60; let best = candles[0]; for (const k of candles) if (k[0] <= target) best = k; return best[4]; };
+  const ret = n => Math.log(spot / pxAgo(n));
+  const freshest = Math.max(...prices.map(x => x.at || 0));
   const st = {
-    product, spot, sig, sig15, sig5h,
+    product, spot, sig, sig15, sig5h, sources: prices.map(x => x.src),
     r5: ret(5), r15: ret(15),
-    z5: ret(5) / (sig * Math.sqrt(5)), z15: ret(15) / (sig * Math.sqrt(15)),
-    ageSec: Math.round(Date.now() / 1000 - c[0][0]),
-    feedGap: Math.abs(Math.log(spot / last)) / sig, // ticker vs latest candle sanity
+    ageSec: Math.max(0, Math.round((Date.now() - freshest) / 1000)),
+    candleLagSec: Math.round(nowS - candles[candles.length - 1][0]),
+    spreadPct: pxs.length > 1 ? (pxs[pxs.length - 1] - pxs[0]) / spot : 0,
   };
+  st.z5 = st.r5 / (sig * Math.sqrt(5)); st.z15 = st.r15 / (sig * Math.sqrt(15));
   st.problems = [];
   if (!(spot > 0) || r.length < 100) st.problems.push('price data missing');
-  if (st.ageSec > 180) st.problems.push(`price data ${st.ageSec}s old`);
+  if (prices.length < 2) st.problems.push(`only ${prices.length} exchange price${prices.length === 1 ? '' : 's'} available`);
+  if (st.ageSec > 30) st.problems.push(`live price ${st.ageSec}s old`);
+  if (st.candleLagSec > 600) st.problems.push(`price history ${Math.round(st.candleLagSec / 60)} min behind`);
+  if (st.spreadPct > 0.002) st.problems.push(`exchanges disagree ${(st.spreadPct * 100).toFixed(2)}%`);
   if (Math.abs(st.z5) > 3) st.problems.push(`sudden ${st.r5 > 0 ? 'spike' : 'drop'} ${(st.r5 * 100).toFixed(2)}% in 5 min`);
   if (sig15 > 2.5 * sig5h) st.problems.push('volatility spiking');
-  if (st.feedGap > 4) st.problems.push('price feed mismatch');
   return st;
 }
 async function marketConditions() {
@@ -248,10 +271,10 @@ async function marketConditions() {
   }
   return out;
 }
-const pct = x => (x >= 0 ? '+' : '') + (x * 100).toFixed(2) + '%';
+const pct = x => Math.abs(x) < 5e-5 ? '0.00%' : (x > 0 ? '+' : '−') + Math.abs(x * 100).toFixed(2) + '%';
 function condLine(st, other) {
   const regime = st.sig15 > 1.5 * st.sig5h ? 'choppy' : st.sig15 < 0.6 * st.sig5h ? 'quiet' : 'normal';
-  return `${st.product.split('-')[0]} 5m ${pct(st.r5)} · 15m ${pct(st.r15)} · vol ${regime} · ${other.product.split('-')[0]} ${other.problems.length ? '⚠️' : 'calm'} · data ${st.ageSec}s old`;
+  return `${st.product.split('-')[0]} 5m ${pct(st.r5)} · 15m ${pct(st.r15)} · vol ${regime} · ${other.product.split('-')[0]} ${other.problems.length ? '⚠️' : 'calm'} · price from ${st.sources.length} exchanges, ${st.ageSec}s old`;
 }
 
 // Full analysis of one Kalshi market given live conditions. Returns per-side verdicts.
@@ -282,6 +305,7 @@ function evaluate(m, st, now = Date.now()) {
     if (up !== null && Math.abs(st.z15) > 2 && (st.z15 > 0) !== up) s.reasons.push(`strong ${st.z15 > 0 ? 'up' : 'down'}trend against this bet`);
     if (s.edge < CFG.MIN_EDGE) s.reasons.push(`edge ${(s.edge * 100).toFixed(1)}¢ below ${(CFG.MIN_EDGE * 100).toFixed(0)}¢`);
     if (s.edge > CFG.MAX_EDGE) s.reasons.push('edge too big to trust (bad data?)');
+    if (Math.abs(s.raw - s.mkt) > CFG.MAX_DISAGREE) s.reasons.push(`model and market disagree by ${Math.round(Math.abs(s.raw - s.mkt) * 100)} pts — market likely knows something`);
     s.ok = s.reasons.length === 0;
     out.push(s);
   }
@@ -346,7 +370,7 @@ async function scan(fast) {
       let okData = `o|${c.m.ticker}|${c.side[0]}|${Math.round(c.ask * 100)}|${count}`, noData = `x|${c.m.ticker}`;
       if (Buffer.byteLength(okData) > 64) { okData = `ok|${id}`; noData = `no|${id}`; }
       await saveSettings().catch(() => {}); // records this window as alerted before the message goes out
-      await say(`🔔 TRADE IDEA — tap within ${CFG.ALERT_TTL_MIN} min\n\n` + info, {
+      await say(`🔔 TRADE IDEA — tap within ${ttlFor(c.m.ticker) < 2 ? ttlFor(c.m.ticker) * 60 + ' sec' : ttlFor(c.m.ticker) + ' min'}\n\n` + info, {
         reply_markup: { inline_keyboard: [[{ text: `✅ Buy ${money(cost)}`, callback_data: okData }, { text: '❌ Skip', callback_data: noData }]] },
       });
     }
@@ -492,7 +516,7 @@ async function onUpdate(u) {
     delete S.pending[id];
     if (act === 'no' || act === 'x') return done('Skipped', '❌ Skipped.');
     await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Placing order…' });
-    if (Date.now() - p.created > CFG.ALERT_TTL_MIN * 60e3) return done('Expired', '⌛ Too late — price may have moved.');
+    if (Date.now() - p.created > ttlFor(p.ticker) * 60e3 + 5000) return done('Expired', '⌛ Too late — price may have moved.');
     const a = await account(true);
     if (a.spent + p.count * p.price + feeTotal(p.count, p.price) > a.dayCap + 0.001) return done('Daily limit hit', `🛑 Daily limit ${money(a.dayCap)} reached.`);
     const m = (await kalshi('GET', `/markets/${p.ticker}`)).market || {};
