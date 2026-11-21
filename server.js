@@ -156,16 +156,22 @@ async function accountRaw() {
   return { cash, profit, spent, held, tradeCap, dayCap, settledCount: settles.length };
 }
 
+// Kalshi V2 orders: one YES leg. Buy YES = bid at p. Buy NO at p = ask (sell YES) at 1-p.
 async function placeBuy({ ticker, side, count, price }) {
-  const r = await kalshi('POST', '/portfolio/orders', {
-    ticker, side, action: 'buy', count, type: 'limit', [side + '_price_dollars']: price.toFixed(4),
-    time_in_force: 'immediate_or_cancel', client_order_id: 'kbot-' + crypto.randomUUID(),
-  });
-  const o = r.order || r;
-  let filled = cnt(o, 'fill_count'); if (!filled) { const rem = num(o.remaining_count_fp ?? o.remaining_count); filled = rem >= 0 ? count - rem : 0; }
-  let cost = d(o, 'taker_fill_cost'); if (!(cost >= 0)) cost = filled * price;
-  let fees = d(o, 'taker_fees'); if (!(fees >= 0)) fees = feeTotal(filled, price);
-  return { filled, total: cost + fees };
+  const yesPrice = side === 'yes' ? price : 1 - price;
+  const body = {
+    ticker, side: side === 'yes' ? 'bid' : 'ask',
+    count: String(count) + '.00', price: yesPrice.toFixed(4),
+    time_in_force: 'immediate_or_cancel', self_trade_prevention_type: 'taker_at_cross',
+    client_order_id: 'kbot-' + crypto.randomUUID(),
+  };
+  const o = await kalshi('POST', '/portfolio/events/orders', body);
+  log('ORDER', JSON.stringify(body), '->', JSON.stringify(o));
+  const filled = num(o.fill_count) || 0;
+  const avgYes = num(o.average_fill_price);
+  const px = avgYes === avgYes ? (side === 'yes' ? avgYes : 1 - avgYes) : price;
+  const fees = num(o.average_fee_paid) === num(o.average_fee_paid) ? num(o.average_fee_paid) * filled : feeTotal(filled, px);
+  return { filled, total: filled * px + fees };
 }
 
 // ---------- model ----------
@@ -429,7 +435,13 @@ const HOOK = '/tg/' + crypto.createHash('sha256').update(TG_TOKEN || 'x').digest
 http.createServer((rq, rs) => {
   if (rq.method === 'POST' && rq.url === HOOK) {
     if (rq.headers['x-telegram-bot-api-secret-token'] !== HOOK_SECRET) { rs.statusCode = 403; return rs.end(); }
-    let b = ''; rq.on('data', c => { b += c; if (b.length > 1e6) rq.destroy(); }); rq.on('end', () => { rs.end('ok'); try { onUpdate(JSON.parse(b)).catch(e => log('update err', e.message)); } catch (e) {} });
+    let b = ''; rq.on('data', c => { b += c; if (b.length > 1e6) rq.destroy(); }); rq.on('end', () => { rs.end('ok'); let u; try { u = JSON.parse(b); } catch (e) { return; }
+      onUpdate(u).catch(async e => {
+        log('update err', e.message);
+        const q = u.callback_query;
+        if (q) { await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Error — see message' }); await tg('editMessageText', { chat_id: q.message.chat.id, message_id: q.message.message_id, text: (q.message.text || '') + '\n\n⚠️ Order failed: ' + e.message.replace(/^.*?-> /, '').slice(0, 300) }); }
+        else if (OWNER) await say('⚠️ Error: ' + e.message.slice(0, 300));
+      }); });
     return;
   }
   rs.setHeader('Content-Type', 'text/plain'); rs.end('ok'); // reveal nothing publicly
