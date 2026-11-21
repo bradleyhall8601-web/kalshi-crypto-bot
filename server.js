@@ -25,6 +25,11 @@ const CFG = {
   FAST_MIN_MINUTES: 2, FAST_MAX_MINUTES: 15, // 15-minute markets: trade while 2-15 min remain
   MIN_EDGE: Number(env.BOT_MIN_EDGE || 0.04), MAX_EDGE: 0.25, MAX_DISAGREE: 0.18,
   FAST_TTL_MIN: 1.5, // 15-min markets move in seconds: alerts expire fast
+  AUTO_FAST: 1,       // auto-trade the 15-minute markets (no tap needed)
+  AUTO_EDGE: 0.05,    // auto trades need a slightly bigger edge than tap alerts (no human double-check)
+  FAST_DAY: 10,       // max $ per day on auto 15-min trades (inside the overall daily limit)
+  FAST_MAX_LOSS: 6,   // stop auto 15-min trading for the day after losing this much
+  FAST_STREAK: 4,     // ...or after this many losses in a row
   MIN_PRICE: 0.15, MAX_PRICE: 0.85,
   MIN_MINUTES: 8, MAX_MINUTES: 70,
   VOL_MULT: Number(env.BOT_VOL_MULT || 1.0), // honest volatility; inflating it makes long shots look cheap
@@ -53,6 +58,10 @@ const SETTINGS = {
   alerts:   { key: 'MAX_ALERTS_PER_RUN', desc: 'max alerts per scan', min: 1, max: 10 },
   every:    { key: 'SCAN_EVERY_MIN', desc: 'scan every N minutes', min: 1, max: 60 },
   ttl:      { key: 'ALERT_TTL_MIN', desc: 'minutes to tap Buy before alert expires', min: 1, max: 30 },
+  auto15:   { key: 'AUTO_FAST', desc: 'auto-trade 15-min markets (1 = on, 0 = off)', min: 0, max: 1 },
+  autoedge: { key: 'AUTO_EDGE', desc: 'min edge for auto 15-min trades (0.05 = 5¢)', min: 0.02, max: 0.5 },
+  fastday:  { key: 'FAST_DAY', desc: 'max $ per day on auto 15-min trades', min: 0, max: 10000 },
+  fastloss: { key: 'FAST_MAX_LOSS', desc: 'stop auto 15-min for the day after losing $ this much', min: 1, max: 10000 },
 };
 const COIN_SERIES = { BTC: ['KXBTCD', 'KXBTC15M'], ETH: ['KXETHD', 'KXETH15M'], SOL: ['KXSOLD', 'KXSOL15M'] };
 const isFast = s => /15M$/.test(s);
@@ -63,7 +72,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 4; blob.SC = S.sc; blob.LED = S.led;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 5; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs;
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok || /not modified/.test(r.error || '')) return; }
@@ -79,11 +88,13 @@ async function loadSettings() {
     const blob = JSON.parse(pm.text.slice(pm.text.indexOf('{')));
     for (const x of Object.values(SETTINGS)) if (typeof blob[x.key] === 'number') CFG[x.key] = blob[x.key];
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
+    if (!(blob.v >= 5)) { CFG.AUTO_FAST = 1; setTimeout(saveSettings, 2000); } // switch on auto 15-min once
     if (!(blob.v >= 4)) { CFG.VOL_MULT = 1.0; CFG.MIN_EDGE = 0.04; CFG.MIN_PRICE = Math.max(CFG.MIN_PRICE, 0.15); if (typeof blob.MODEL_WEIGHT !== 'number') CFG.MODEL_WEIGHT = 0.5; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 3)) { CFG.SCAN_EVERY_MIN = 1; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 2)) { for (const x of ['KXBTC15M', 'KXETH15M']) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); setTimeout(saveSettings, 2000); } // add 15-min markets once
     if (blob.SC && typeof blob.SC === 'object') S.sc = { ...S.sc, ...blob.SC, ev: blob.SC.ev || {} };
-    if (blob.LED && typeof blob.LED.spent === 'number') S.led = blob.LED;
+    if (blob.SETL > 0) S.setlTs = blob.SETL;
+    if (blob.LED && typeof blob.LED.spent === 'number') S.led = { ...newLed(blob.LED.day), ...blob.LED };
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
   } catch (e) { log('settings parse error', e.message); }
@@ -91,7 +102,8 @@ async function loadSettings() {
 let scanTimer = null;
 function schedule() { if (scanTimer) clearInterval(scanTimer); if (env.BOT_TEST !== '1') scanTimer = setInterval(tick, CFG.SCAN_EVERY_MIN * 60e3); }
 
-const S = { led: { day: '', spent: 0 }, sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+const newLed = day => ({ day, spent: 0, fast: 0, autoPnl: 0, streak: 0, fastOff: false, auto: [] });
+const S = { candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
@@ -164,7 +176,17 @@ async function accountRaw() {
   // realized profit = settled payouts minus what those positions cost, since START_TS
   const settles = await pageAll(`/portfolio/settlements?min_ts=${START_TS}`, 'settlements');
   let profit = 0;
-  for (const s of settles) profit += d(s, 'revenue') - (d(s, 'yes_total_cost') || 0) - (d(s, 'no_total_cost') || 0) - (d(s, 'fee_cost') || 0);
+  const pnlOf = s => d(s, 'revenue') - (d(s, 'yes_total_cost') || 0) - (d(s, 'no_total_cost') || 0) - (d(s, 'fee_cost') || 0);
+  for (const s of settles) profit += pnlOf(s);
+  // report every newly settled trade
+  const stime = s => Date.parse(s.settled_time || s.created_time || 0) || 0;
+  if (!(S.setlTs > 0)) S.setlTs = Math.max(Date.now(), ...settles.map(stime)); // first boot: don't replay history
+  const fresh = settles.filter(x => stime(x) > S.setlTs).sort((x, y) => stime(x) - stime(y));
+  for (const x of fresh) {
+    const pl = pnlOf(x), res = String(x.market_result || x.result || '').toUpperCase();
+    await say(`${pl >= 0 ? '✅ WON' : '❌ LOST'} ${pl >= 0 ? '+' : '−'}${money(Math.abs(pl))} · ${x.ticker || x.market_ticker}${res ? ` settled ${res}` : ''}\nPaid out ${money(d(x, 'revenue') || 0)} · Profit since start ${money(profit)}`);
+  }
+  if (fresh.length) { S.setlTs = stime(fresh[fresh.length - 1]); saveSettings().catch(() => {}); }
   // today's spend = buys filled since midnight CT
   const fills = await pageAll(`/portfolio/fills?min_ts=${startOfTodayCT()}`, 'fills');
   if (fills.length && !S.loggedFill) { S.loggedFill = 1; log('FILLSAMPLE', JSON.stringify(fills[0])); }
@@ -179,7 +201,7 @@ async function accountRaw() {
     if (px === px) fillSpent += cnt(f) * px + (fee === fee ? fee : feeTotal(cnt(f), px));
   }
   const today = String(startOfTodayCT());
-  if (S.led.day !== today) S.led = { day: today, spent: 0 };
+  if (S.led.day !== today) S.led = { ...newLed(today), auto: S.led.auto || [] };
   const spent = Math.max(fillSpent, S.led.spent); // never under-count
   // events we already hold
   const pos = await kalshi('GET', '/portfolio/positions?count_filter=position&limit=1000');
@@ -207,6 +229,7 @@ async function ensureShardFunds(idx, needed) {
     source_exchange_shard: Number(src), destination_exchange_shard: idx, client_transfer_id: crypto.randomUUID(),
   });
   log('TRANSFER', money(short), 'shard', src, '->', idx);
+  say(`🔁 Moved ${money(short)} of your Kalshi cash from shard ${src} to shard ${idx} to fund this trade (still your money).`);
   for (let i = 0; i < 12; i++) { // transfer is async; wait until it lands
     await new Promise(r => setTimeout(r, 500));
     cash = shardCash(await kalshi('GET', '/portfolio/balance'));
@@ -216,6 +239,13 @@ async function ensureShardFunds(idx, needed) {
 }
 
 // Kalshi V2 orders: one YES leg. Buy YES = bid at p. Buy NO at p = ask (sell YES) at 1-p.
+// highest price worth paying: up to 1¢ above the ask, but only while the edge after fees stays >= need
+function bestLimit(p, ask, need) {
+  const feePer = q => 0.07 * q * (1 - q) + 0.005;
+  let limit = Math.min(0.99, Math.round((ask + 0.01) * 1000) / 1000);
+  while (limit > ask && limit + feePer(limit) > p - need) limit = Math.round((limit - 0.001) * 1000) / 1000;
+  return ask + feePer(ask) > p - need ? null : limit;
+}
 async function placeBuy({ ticker, side, count, price }) {
   const m = (await kalshi('GET', `/markets/${ticker}`)).market || {};
   const idx = Number.isInteger(m.exchange_index) ? m.exchange_index : 0;
@@ -235,7 +265,7 @@ async function placeBuy({ ticker, side, count, price }) {
   const px = avgYes === avgYes ? (side === 'yes' ? avgYes : 1 - avgYes) : price;
   const fees = num(o.average_fee_paid) === num(o.average_fee_paid) ? num(o.average_fee_paid) * filled : feeTotal(filled, px);
   const total = filled * px + fees;
-  const today = String(startOfTodayCT()); if (S.led.day !== today) S.led = { day: today, spent: 0 };
+  const today = String(startOfTodayCT()); if (S.led.day !== today) S.led = { ...newLed(today), auto: S.led.auto || [] };
   S.led.spent += total; await saveSettings().catch(() => {});
   return { filled, total, fees, px };
 }
@@ -262,7 +292,8 @@ async function coinState(product) {
   const H = { 'User-Agent': 'kalshi-bot' };
   const [prices, c] = await Promise.all([
     exchangePrices(product),
-    req(`https://api.exchange.coinbase.com/products/${product}/candles?granularity=60`, { headers: H }),
+    (S.candles[product] && Date.now() - S.candles[product].t < 30e3) ? S.candles[product].v
+      : req(`https://api.exchange.coinbase.com/products/${product}/candles?granularity=60`, { headers: H }).then(v => { S.candles[product] = { t: Date.now(), v }; return v; }),
   ]);
   const candles = c.slice().reverse(); // oldest -> newest: [time, low, high, open, close, vol]
   const r = []; for (let i = 1; i < candles.length; i++) r.push(Math.log(candles[i][4] / candles[i - 1][4]));
@@ -364,6 +395,17 @@ async function scan(fast) {
     const lo = isFast(series) ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES, hi = isFast(series) ? CFG.FAST_MAX_MINUTES : CFG.MAX_MINUTES;
     const markets = await pageAll(`/markets?series_ticker=${series}&status=open`, 'markets');
     if (!S.seen[series]) { S.seen[series] = 1; log('SERIES', series, 'open markets:', markets.length); }
+    S.blk = S.blk || {};
+    const blocked = cond[product].problems.length > 0, coinName = product.split('-')[0];
+    const prev = S.blk[product];
+    if (blocked && !(prev && prev.on)) {             // just became blocked: tell (at most every 15 min)
+      const tell = !prev || Date.now() - prev.t > 15 * 60e3;
+      if (tell) await say(`🚧 ${coinName} trading paused — ${cond[product].problems.join('; ')}. I'll tell you when it clears.`);
+      S.blk[product] = { on: true, t: tell ? Date.now() : prev.t, told: tell };
+    } else if (!blocked && prev && prev.on) {        // just cleared
+      if (prev.told) await say(`✅ ${coinName} conditions clear again — trading resumed.`);
+      S.blk[product] = { on: false, t: prev.t };
+    }
     if (cond[product].problems.length) { if (env.BOT_DEBUG === '1') log('COND', product, cond[product].problems.join('; '));
       if (!S.condWarn || Date.now() - S.condWarn > 15 * 60e3) { S.condWarn = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; ')); } continue; }
     for (const m of markets) {
@@ -381,9 +423,18 @@ async function scan(fast) {
   for (const c of cands) {
     if (sent >= CFG.MAX_ALERTS_PER_RUN) break;
     if (used.has(c.m.event_ticker)) continue;
-    // size within: per-trade cap, today's remaining budget, AND the cash actually in the wallet (fees + 2¢ slippage included)
-    const worst = Math.min(c.ask + CFG.MAX_SLIPPAGE, 0.99);
-    const budget = Math.min(a.tradeCap, remaining, a.cash - 0.02);
+    const fastSeries = isFast(c.m.event_ticker.split('-')[0]);
+    const autoFast = fastSeries && CFG.AUTO_FAST === 1 && !S.led.fastOff;
+    const auto = S.unlocked || autoFast;
+    let limit = null;
+    if (autoFast && !S.unlocked) {
+      if (c.edge < CFG.AUTO_EDGE) continue;                       // auto needs the bigger edge
+      limit = bestLimit(c.p, c.ask, CFG.AUTO_EDGE / 2); if (limit === null) continue;
+    }
+    // size within: per-trade cap, today's remaining budget, AND the cash actually in the wallet (fees + slippage included)
+    const worst = limit || Math.min(c.ask + CFG.MAX_SLIPPAGE, 0.99);
+    const fastLeft = autoFast && !S.unlocked ? CFG.FAST_DAY - (S.led.fast || 0) : Infinity;
+    const budget = Math.min(a.tradeCap, remaining, a.cash - 0.02, fastLeft);
     let count = Math.floor(budget / worst);
     while (count > 0 && count * worst + feeTotal(count, worst) > budget) count--;
     if (env.BOT_DEBUG === '1') log('SIZE', c.m.ticker, JSON.stringify({ cap: a.tradeCap, remaining, cash: a.cash, worst, count }));
@@ -399,12 +450,21 @@ async function scan(fast) {
       `Win: +${money(count - cost)} · Lose: −${money(cost)}\n` +
       `Win chance: bot ${(c.p * 100).toFixed(0)}% (model ${(c.raw * 100).toFixed(0)}%, market ${(c.mkt * 100).toFixed(0)}%) vs price ${(c.ask * 100).toFixed(0)}¢ → edge ${(c.edge * 100).toFixed(1)}¢\n` +
       `💰 Wallet ${money(a.cash)} → ${money(a.cash - cost)} after · Today ${money(a.spent)}/${money(a.dayCap)} · Profit ${money(a.profit)}\n📊 ${c.cond} · ${coin} ${money(c.spot)}`;
-    if (S.unlocked) {
+    if (auto) {
+      const unmark = () => { delete S.sc.ev[c.m.event_ticker]; S.sc.open = S.sc.open.filter(o => o.t !== c.m.ticker); }; // nothing bought: window stays open for a later try
       try {
-        const r = await placeBuy({ ticker: c.m.ticker, side: c.side, count, price: c.ask });
+        const r = await placeBuy({ ticker: c.m.ticker, side: c.side, count, price: limit || c.ask });
         remaining -= r.total; a.cash -= r.total; acctCache = null;
-        await say(`🤖 AUTO ${r.filled ? `BOUGHT ${r.filled}/${count} for ${money(r.total)} (fees ${money(r.fees)})` : 'NOT FILLED'}\n\n` + info);
-      } catch (e) { log('auto order failed', e.message); await say(`⚠️ AUTO order failed: ${e.message.replace(/^.*?-> /, '').slice(0, 200)}\n\n` + info); }
+        if (r.filled > 0) {
+          if (fastSeries) { S.led.fast = (S.led.fast || 0) + r.total; S.led.auto.push({ t: c.m.ticker, s: c.side[0], n: r.filled, cost: Math.round(r.total * 100) / 100, c: Date.parse(c.m.close_time) }); if (S.led.auto.length > 30) S.led.auto.shift(); }
+          await saveSettings().catch(() => {});
+          await say(`🤖 AUTO${fastSeries ? ' 15-MIN' : ''} BOUGHT ${r.filled}/${count} ${c.side.toUpperCase()} @ ${cents(r.px)} for ${money(r.total)} (fees ${money(r.fees)})\n` +
+            `Auto 15-min today: spent ${money(S.led.fast || 0)}/${money(CFG.FAST_DAY)} · result ${S.led.autoPnl >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\n\n` + info);
+        } else {
+          unmark(); log('auto not filled', c.m.ticker);
+          S.nf = S.nf || {}; if (!S.nf[c.m.event_ticker]) { S.nf[c.m.event_ticker] = 1; await say(`⏳ AUTO order not filled (price moved before it executed). No money spent — will retry this window if the edge returns.\n\n` + info); }
+        }
+      } catch (e) { unmark(); log('auto order failed', e.message); await say(`⚠️ AUTO order failed: ${e.message.replace(/^.*?-> /, '').slice(0, 200)}\n\n` + info); }
     } else {
       const id = crypto.randomBytes(4).toString('hex');
       S.pending[id] = { ticker: c.m.ticker, side: c.side, price: c.ask, count, created: Date.now() };
@@ -426,7 +486,7 @@ async function applySetting(name, raw) {
     CFG.SERIES = list; await saveSettings(); return '✅ coins = ' + String(raw).toUpperCase();
   }
   const x = SETTINGS[name]; let v = Number(String(raw ?? '').replace(/[$%¢]/g, ''));
-  if (['edge', 'minprice', 'maxprice', 'autotrade', 'autoday'].includes(name) && v >= 1 && v <= 100) v = v / 100; // /set edge 8 = 8¢
+  if (['edge', 'autoedge', 'minprice', 'maxprice', 'autotrade', 'autoday'].includes(name) && v >= 1 && v <= 100) v = v / 100; // /set edge 8 = 8¢
   if (!x || !(v === v)) return 'Usage: /set <name> <value>\nExample: /set trade 3\nSee /help for names.';
   if (v < x.min || v > x.max) return `❌ ${name} must be between ${x.min} and ${x.max}.`;
   const old = CFG[x.key]; CFG[x.key] = v;
@@ -601,7 +661,12 @@ async function onUpdate(u) {
   if (t.startsWith('/pause')) { S.paused = true; await saveSettings(); return say('⏸ Paused.'); }
   if (t.startsWith('/resume')) { S.paused = false; await saveSettings(); return say('▶️ Running.'); }
   if (t.startsWith('/lock')) { S.unlocked = false; S.manualLock = true; await saveSettings(); return say(`🔒 Confirm mode locked. /auto to allow auto-trading at +$${CFG.UNLOCK_PROFIT} again.`); }
-  if (t.startsWith('/auto')) { S.manualLock = false; await saveSettings(); return say(`Auto-trading will turn on at +$${CFG.UNLOCK_PROFIT} profit.`); }
+  if (/^\/auto(@\w+)?$/.test(t)) { S.manualLock = false; await saveSettings(); return say(`Auto-trading will turn on at +$${CFG.UNLOCK_PROFIT} profit.`); }
+  if (t.startsWith('/auto15')) {
+    const on = !/off|0|stop/.test(t);
+    CFG.AUTO_FAST = on ? 1 : 0; if (on) { S.led.fastOff = false; S.led.streak = 0; } await saveSettings();
+    return say(on ? `🤖 Auto 15-min trading ON: up to ${money(CFG.SMALL_TRADE)}/trade, ${money(CFG.FAST_DAY)}/day, stops after ${money(CFG.FAST_MAX_LOSS)} loss or ${CFG.FAST_STREAK} losses in a row.` : '⏸ Auto 15-min trading OFF. 15-min ideas come as tap alerts.');
+  }
   if (t.startsWith('/scan')) { await say('🔎 Scanning now…'); await tick(); return say(S.lastError ? '⚠️ ' + S.lastError : '✅ Scan done. No alert = no good trade right now.'); }
   if (t.startsWith('/stats')) {
     const c = S.sc, n = c.n;
@@ -609,7 +674,7 @@ async function onUpdate(u) {
     return say(`📈 Scorecard (every alert, 1 contract each)\nSettled: ${n} · waiting: ${c.open.length}\nBot predicted wins: ${(c.sumP / n * 100).toFixed(0)}% · actual: ${(c.wins / n * 100).toFixed(0)}%\nPaper profit: ${c.pnl >= 0 ? '+' : '−'}${money(Math.abs(c.pnl))} (${(c.pnl / n * 100).toFixed(1)}¢ per alert)\nAccuracy score (Brier, lower is better): ${(c.brier / n).toFixed(3)}\n${n < 50 ? 'Under 50 results is mostly luck — judge it after 50+.' : ''}`);
   }
   if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins btc,eth,sol');
-  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol');
+  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol');
   if (t.startsWith('/set')) { const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
   if (t.startsWith('/rollback')) return rollback();
   if (t.startsWith('/claude') || !t.startsWith('/')) {
@@ -619,7 +684,7 @@ async function onUpdate(u) {
   }
   try {
     const a = await account();
-    return say(`📊 Status\nMode: ${S.paused ? 'PAUSED' : S.unlocked ? 'AUTO' : 'CONFIRM (you tap to buy)'}\nCash: ${money(a.cash)}\nProfit since start: ${money(a.profit)} (auto at ${money(CFG.UNLOCK_PROFIT)})\nToday: ${money(a.spent)} of ${money(a.dayCap)} · max ${money(a.tradeCap)}/trade\nLast scan: ${S.lastScan ? timeCT(S.lastScan) : 'not yet'}${S.lastError ? '\nLast error: ' + S.lastError : ''}\n\n/help for all commands`);
+    return say(`📊 Status\nMode: ${S.paused ? 'PAUSED' : S.unlocked ? 'AUTO' : 'CONFIRM (you tap to buy)'}\nAuto 15-min: ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today (loss limit)' : 'ON'} · today ${money(S.led.fast || 0)}/${money(CFG.FAST_DAY)} · result ${(S.led.autoPnl || 0) >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\nCash: ${money(a.cash)}\nProfit since start: ${money(a.profit)} (auto at ${money(CFG.UNLOCK_PROFIT)})\nToday: ${money(a.spent)} of ${money(a.dayCap)} · max ${money(a.tradeCap)}/trade\nLast scan: ${S.lastScan ? timeCT(S.lastScan) : 'not yet'}${S.lastError ? '\nLast error: ' + S.lastError : ''}\n\n/help for all commands`);
   } catch (e) { return say('⚠️ Can\'t reach Kalshi: ' + e.message.slice(0, 200)); }
 }
 
@@ -646,7 +711,7 @@ http.createServer((rq, rs) => {
     { command: 'claude', description: 'Talk to Claude / ask for changes' }, { command: 'status', description: 'Money, profit & mode' },
     { command: 'stats', description: 'Prediction scorecard' }, { command: 'settings', description: 'See all settings' }, { command: 'set', description: 'Change a setting: /set trade 3' },
     { command: 'scan', description: 'Scan for trades now' }, { command: 'pause', description: 'Stop trading' }, { command: 'resume', description: 'Start again' },
-    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'rollback', description: 'Undo last code change' },
+    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'rollback', description: 'Undo last code change' },
     { command: 'help', description: 'All commands' }] });
   await loadSettings(); schedule();
   try { const me = await tg('getMe', {}); log('SELFCHECK telegram', me.ok ? 'OK @' + me.result.username : 'FAILED'); } catch (e) { log('SELFCHECK telegram FAILED', e.message); }
@@ -695,7 +760,26 @@ async function repairKey() {
   SIGN_KEY = original; log('KEYREPAIR no match');
 }
 
+async function gradeAutoTrades() {
+  let changed = false;
+  for (const o of (S.led.auto || []).filter(x => !x.done && Date.now() > x.c + 3 * 60e3)) {
+    let m; try { m = (await kalshi('GET', `/markets/${o.t}`)).market || {}; } catch (e) { continue; }
+    const res = String(m.result || '').toLowerCase(); if (res !== 'yes' && res !== 'no') continue;
+    const win = (o.s === 'y' ? 'yes' : 'no') === res;
+    const pnl = (win ? o.n : 0) - o.cost;
+    o.done = 1; o.pnl = Math.round(pnl * 100) / 100; changed = true;
+    S.led.autoPnl = Math.round(((S.led.autoPnl || 0) + pnl) * 100) / 100;
+    S.led.streak = win ? 0 : (S.led.streak || 0) + 1;
+    if (!S.led.fastOff && (S.led.autoPnl <= -CFG.FAST_MAX_LOSS || S.led.streak >= CFG.FAST_STREAK)) {
+      S.led.fastOff = true;
+      await say(`🛑 Auto 15-min trading stopped for today: ${S.led.streak >= CFG.FAST_STREAK ? `${S.led.streak} losses in a row` : `down ${money(-S.led.autoPnl)}`}. It restarts tomorrow (or send /auto15 on).`);
+    }
+  }
+  if (changed) await saveSettings();
+}
+
 async function scoreAlerts() {
+  await gradeAutoTrades();
   const due = S.sc.open.filter(o => Date.now() > o.c + 3 * 60e3);
   let changed = false;
   for (const o of due) {
@@ -705,6 +789,7 @@ async function scoreAlerts() {
     const win = (o.s === 'y' ? 'yes' : 'no') === res ? 1 : 0;
     S.sc.n++; S.sc.wins += win; S.sc.sumP += o.p; S.sc.brier += (o.p - win) ** 2;
     S.sc.pnl += win - o.a - 0.07 * o.a * (1 - o.a); // per 1 contract, after fee
+    await say(`📈 Graded: ${o.t} ${o.s === 'y' ? 'YES' : 'NO'} @ ${cents(o.a)} would have ${win ? 'WON' : 'LOST'} (bot gave it ${Math.round(o.p * 100)}%). Scorecard: ${S.sc.wins}/${S.sc.n} right · paper ${S.sc.pnl >= 0 ? '+' : '−'}${money(Math.abs(S.sc.pnl))}/contract`);
     S.sc.open = S.sc.open.filter(x => x !== o); changed = true;
   }
   if (changed) await saveSettings();
@@ -720,7 +805,7 @@ async function tick(fast = false) {
   finally { S.busy = false; }
 }
 if (env.BOT_TEST !== '1') { // tests drive scans manually
-  setInterval(() => tick(true), 30e3); // 15-min markets checked every 30 seconds
+  setInterval(() => tick(true), 10e3); // 15-min markets checked every 10 seconds
   setTimeout(tick, 15000);
 }
 // keep the free Render instance awake

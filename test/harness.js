@@ -49,13 +49,13 @@ global.fetch = async (url, o = {}) => {
   // ---- Exchanges ----
   const coinOf = s => (/eth/i.test(s) ? 'eth' : 'btc');
   if (u.includes('api.exchange.coinbase.com')) {
-    const coin = coinOf(u), px = W[coin] * (W.shock && W.shock.coin === coin ? 1 : 1);
+    const coin = coinOf(u), px = W[coin] * (W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1);
     if (W.down.coinbase) return J({}, 500);
-    if (u.includes('/candles')) return J(genCandles(W[coin], W.vol, W.shock && W.shock.coin === coin ? W.shock.pct : 0));
+    if (u.includes('/candles')) return J(genCandles(W[coin], W.vol, 0));
     return J({ price: String(px), time: new Date(W.now() - (W.stale.coinbase ? 120e3 : 1000)).toISOString() });
   }
-  if (u.includes('api.kraken.com')) { if (W.down.kraken) return J({}, 500); const coin = coinOf(u); return J({ result: { X: { c: [String(W[coin] * (W.krakenSkew || 1))] } } }); }
-  if (u.includes('bitstamp.net')) { if (W.down.bitstamp) return J({}, 500); const coin = coinOf(u); return J({ last: String(W[coin]), timestamp: String(Math.floor(W.now() / 1000) - (W.stale.bitstamp ? 120 : 1)) }); }
+  if (u.includes('api.kraken.com')) { if (W.down.kraken) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ result: { X: { c: [String(W[coin] * sh * (W.krakenSkew || 1))] } } }); }
+  if (u.includes('bitstamp.net')) { if (W.down.bitstamp) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ last: String(W[coin] * sh), timestamp: String(Math.floor(W.now() / 1000) - (W.stale.bitstamp ? 120 : 1)) }); }
   // ---- Kalshi ----
   if (u.includes('kalshi')) {
     const path = new URL(u).pathname, h = o.headers || {};
