@@ -561,18 +561,24 @@ async function onUpdate(u) {
     const a = await account(true);
     const m = (await kalshi('GET', `/markets/${p.ticker}`)).market || {};
     const ask = d(m, p.side + '_ask');
-    if (!(ask > 0) || ask > p.price + CFG.MAX_SLIPPAGE) return done('Price moved', `⚠️ Price moved to ${cents(ask)}. Not bought.`);
-    // re-analyze BTC + ETH and this market right now, with live data
+    if (!(ask > 0 && ask < 1)) return done('Market closed', '⏹ Market no longer tradable. Not bought.');
+    // re-analyze BTC + ETH and this market right now, at TODAY'S price (not the alert's)
     const series = p.ticker.split('-')[0], product = CFG.SPOT[series];
     const cond = await marketConditions();
     const v = evaluate(m, cond[product]).find(x => x.side === p.side);
-    const relaxed = v ? v.reasons.filter(r => !/^edge .* below/.test(r)) : ['market data unavailable'];
-    if (!v || relaxed.length || v.edge < CFG.MIN_EDGE / 2) {
-      const why = v ? (relaxed.length ? relaxed : v.reasons).join('; ') : 'market data unavailable';
-      return done('Not bought — conditions changed', `🛑 Live re-check failed: ${why}. Not bought.`);
+    if (!v) return done('Not bought', '🛑 Live re-check failed: market data unavailable. Not bought.');
+    const feePer = q => 0.07 * q * (1 - q) + 0.005;
+    const fairMax = v.p - CFG.MIN_EDGE / 2; // highest price that still leaves a real edge after fees
+    if (ask + feePer(ask) > fairMax) {
+      const moved = Math.abs(ask - p.price) >= 0.005 ? `Price moved to ${cents(ask)} (was ${cents(p.price)}) — ` : '';
+      return done('No edge left', `⚠️ ${moved}no edge left at today's price (bot's fair value ~${cents(v.p)}). Not bought.`);
     }
+    const other = v.reasons.filter(r => !/^edge .* below|^price .* outside/.test(r));
+    if (other.length) return done('Not bought — conditions changed', `🛑 Live re-check failed: ${other.join('; ')}. Not bought.`);
+    // limit: up to 1¢ above the live ask, but never past the price where the edge disappears
+    let limit = Math.min(0.99, ask + 0.01);
+    while (limit > ask && limit + feePer(limit) > fairMax) limit = Math.round((limit - 0.001) * 1000) / 1000;
     // worst-case cost (price can tick up to the limit) must fit the per-trade cap, today's budget and the wallet
-    const limit = Math.min(p.price + CFG.MAX_SLIPPAGE, 0.99);
     const worstCost = n => n * limit + feeTotal(n, limit);
     const room = Math.min(a.tradeCap, a.dayCap - a.spent, a.cash - 0.02);
     let count = p.count;

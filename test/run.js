@@ -103,7 +103,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(aNo && /BUY NO/.test(aNo.text), 'NO-side alert generated');
   await tap(post, btn(aNo)); await wait(2000);
   const oNo = W.orders.slice(-1)[0];
-  ok(oNo && oNo.side === 'ask' && Math.abs(Number(oNo.price) - (1 - (Number(mNo.no_ask_dollars) + 0.02))) < 0.0011, 'NO buy sent as ask at 1 − limit');
+  ok(oNo && oNo.side === 'ask' && Number(oNo.price) >= 1 - (Number(mNo.no_ask_dollars) + 0.0101) && Number(oNo.price) <= 1 - Number(mNo.no_ask_dollars) + 1e-9, 'NO buy sent as ask at 1 − limit (limit ≤ live NO ask + 1¢)', oNo && oNo.price);
   W.fills = W.fills.map(f => ({ ...f, fee_cost: undefined })); // even if Kalshi omitted fees, ledger keeps the true spend
   await send(post, '/status'); await wait(400);
   const spent2 = Number((lastMsg().text.match(/Today: \$(\d+\.\d\d)/) || [])[1]);
@@ -133,7 +133,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   const mP = market('KXBTCD', 'btc', 40, 60044, 0.16);
   const pTap = `b|${mP.ticker}|y|${Math.round(Number(mP.yes_ask_dollars) * 1000)}|3`;
   mP.yes_ask_dollars = (Number(mP.yes_ask_dollars) + 0.05).toFixed(4);
-  await tap(post, pTap); await wait(1200); ok(/Price moved/.test(edits().slice(-1)[0] || ''), 'price jump blocks Buy');
+  await tap(post, pTap); await wait(1200); ok(/Price moved to .* no edge left/.test(edits().slice(-1)[0] || ''), 'price jump that kills the edge blocks Buy', edits().slice(-1)[0]);
   mP.yes_ask_dollars = (Number(mP.yes_ask_dollars) - 0.05).toFixed(4);
   await tap(post, pTap, 300); await wait(800); ok(/Too late/.test(edits().slice(-1)[0] || ''), 'expired alert blocks Buy');
   W.shock = { coin: 'eth', pct: 0.02 };
@@ -154,6 +154,15 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   await tap(post, `b|${mT.ticker}|y|${Math.round(Number(mT.yes_ask_dollars) * 1000)}|2`); await wait(2000);
   ok(/Order failed: .*write::transfer/.test(edits().slice(-1)[0] || ''), 'transfer failure shown on the alert', edits().slice(-1)[0]);
   W.transferFails = false;
+
+  const mG = market('KXBTCD', 'btc', 40, 60048, 0.17); // bigger edge
+  const gTap = `b|${mG.ticker}|y|${Math.round(Number(mG.yes_ask_dollars) * 1000)}|3`;
+  mG.yes_ask_dollars = (Number(mG.yes_ask_dollars) + 0.02).toFixed(4);
+  const oc = W.orders.length; W.shards = { 0: 7, 2: 0 };
+  await tap(post, gTap); await wait(2500);
+  ok(W.orders.length === oc + 1 && /✅ BOUGHT/.test(edits().slice(-1)[0] || ''), 'small move that keeps the edge still buys at the live price', edits().slice(-1)[0]);
+  const lim = Number(W.orders.slice(-1)[0].price);
+  ok(lim <= Number(mG.yes_ask_dollars) + 0.0101, 'limit never more than 1¢ above live ask', lim);
 
   console.log('\n10. Market-condition blocks at scan');
   clearMarkets();
