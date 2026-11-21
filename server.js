@@ -23,10 +23,11 @@ const CFG = {
   SERIES: (env.BOT_SERIES || 'KXBTCD,KXETHD,KXBTC15M,KXETH15M').split(',').map(s => s.trim()).filter(Boolean),
   SPOT: { KXBTCD: 'BTC-USD', KXBTC: 'BTC-USD', KXBTC15M: 'BTC-USD', KXETHD: 'ETH-USD', KXETH: 'ETH-USD', KXETH15M: 'ETH-USD', KXSOLD: 'SOL-USD', KXSOL15M: 'SOL-USD' },
   FAST_MIN_MINUTES: 2, FAST_MAX_MINUTES: 15, // 15-minute markets: trade while 2-15 min remain
-  MIN_EDGE: Number(env.BOT_MIN_EDGE || 0.06), MAX_EDGE: 0.25,
-  MIN_PRICE: 0.10, MAX_PRICE: 0.85,
+  MIN_EDGE: Number(env.BOT_MIN_EDGE || 0.04), MAX_EDGE: 0.25,
+  MIN_PRICE: 0.15, MAX_PRICE: 0.85,
   MIN_MINUTES: 8, MAX_MINUTES: 70,
-  VOL_MULT: Number(env.BOT_VOL_MULT || 1.25),
+  VOL_MULT: Number(env.BOT_VOL_MULT || 1.0), // honest volatility; inflating it makes long shots look cheap
+  MODEL_WEIGHT: 0.5, // blend: 50% our model, 50% the market's own price (guards against model overconfidence)
   UNLOCK_PROFIT: 100, RELOCK_PROFIT: 50,
   SMALL_TRADE: 2, SMALL_DAY: 15, SCALED_TRADE_PCT: 0.02, SCALED_DAY_PCT: 0.10,
   MAX_ALERTS_PER_RUN: 2, ALERT_TTL_MIN: 4, MAX_SLIPPAGE: 0.02,
@@ -46,6 +47,7 @@ const SETTINGS = {
   maxprice: { key: 'MAX_PRICE', desc: 'skip contracts pricier than this', min: 0.01, max: 0.99 },
   minmins:  { key: 'MIN_MINUTES', desc: 'only markets closing in at least N min', min: 1, max: 1440 },
   maxmins:  { key: 'MAX_MINUTES', desc: 'only markets closing within N min', min: 5, max: 1440 },
+  trust:    { key: 'MODEL_WEIGHT', desc: 'how much to trust the model vs market price (0.5 = half/half)', min: 0.1, max: 1 },
   vol:      { key: 'VOL_MULT', desc: 'volatility multiplier (higher = more cautious)', min: 0.5, max: 3 },
   alerts:   { key: 'MAX_ALERTS_PER_RUN', desc: 'max alerts per scan', min: 1, max: 10 },
   every:    { key: 'SCAN_EVERY_MIN', desc: 'scan every N minutes', min: 1, max: 60 },
@@ -56,9 +58,9 @@ const isFast = s => /15M$/.test(s);
 let pinnedId = null;
 function settingsText() { return Object.entries(SETTINGS).map(([n, x]) => `${n} = ${CFG[x.key]}`).join('\n') + `\nmarkets = ${CFG.SERIES.join(', ')}`; }
 async function saveSettings() {
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 3;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 4; blob.SC = S.sc;
   const text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
-  if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok) return; }
+  if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok || /not modified/.test(r.error || '')) return; }
   const r = await tg('sendMessage', { chat_id: OWNER, text, disable_notification: true });
   if (r.ok) { pinnedId = r.result.message_id; await tg('pinChatMessage', { chat_id: OWNER, message_id: pinnedId, disable_notification: true }); }
 }
@@ -71,8 +73,10 @@ async function loadSettings() {
     const blob = JSON.parse(pm.text.slice(pm.text.indexOf('{')));
     for (const x of Object.values(SETTINGS)) if (typeof blob[x.key] === 'number') CFG[x.key] = blob[x.key];
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
+    if (!(blob.v >= 4)) { CFG.VOL_MULT = 1.0; CFG.MIN_EDGE = 0.04; CFG.MIN_PRICE = Math.max(CFG.MIN_PRICE, 0.15); if (typeof blob.MODEL_WEIGHT !== 'number') CFG.MODEL_WEIGHT = 0.5; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 3)) { CFG.SCAN_EVERY_MIN = 1; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 2)) { for (const x of ['KXBTC15M', 'KXETH15M']) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); setTimeout(saveSettings, 2000); } // add 15-min markets once
+    if (blob.SC && typeof blob.SC === 'object') S.sc = { ...S.sc, ...blob.SC };
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
   } catch (e) { log('settings parse error', e.message); }
@@ -80,7 +84,7 @@ async function loadSettings() {
 let scanTimer = null;
 function schedule() { if (scanTimer) clearInterval(scanTimer); scanTimer = setInterval(tick, CFG.SCAN_EVERY_MIN * 60e3); }
 
-const S = { seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+const S = { sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [] }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
@@ -107,7 +111,7 @@ async function kalshiOnce(method, path, body) {
 }
 async function tg(method, payload) {
   try { return await req(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, { method: 'POST', body: payload }); }
-  catch (e) { log('telegram error', e.message); return { ok: false }; }
+  catch (e) { if (!/not modified/.test(e.message)) log('telegram error', e.message); return { ok: false, error: e.message }; }
 }
 const say = (text, extra = {}) => OWNER ? tg('sendMessage', { chat_id: OWNER, text, ...extra }) : null;
 const num = v => (v === undefined || v === null || v === '') ? NaN : Number(v);
@@ -246,14 +250,21 @@ async function scan(fast) {
       else if (st === 'between') pY = probAbove(spot, fl, sig, mins) - probAbove(spot, cp, sig, mins);
       else continue;
       if (!(pY >= 0 && pY <= 1)) continue;
-      for (const s of [{ side: 'yes', p: pY, ask: d(m, 'yes_ask') }, { side: 'no', p: 1 - pY, ask: d(m, 'no_ask') }]) {
+      const yAsk = d(m, 'yes_ask'), nAsk = d(m, 'no_ask');
+      let yBid = d(m, 'yes_bid'); if (!(yBid > 0)) yBid = nAsk > 0 ? 1 - nAsk : yAsk;
+      const mid = (yAsk + yBid) / 2; // market's own YES probability
+      if (!(mid > 0 && mid < 1)) continue;
+      const W = CFG.MODEL_WEIGHT;
+      for (const s of [{ side: 'yes', raw: pY, mkt: mid, ask: yAsk }, { side: 'no', raw: 1 - pY, mkt: 1 - mid, ask: nAsk }]) {
         if (!(s.ask >= CFG.MIN_PRICE && s.ask <= CFG.MAX_PRICE)) continue;
+        s.p = W * s.raw + (1 - W) * s.mkt;
         const edge = s.p - s.ask - (0.07 * s.ask * (1 - s.ask) + 0.005);
         if (edge >= CFG.MIN_EDGE && edge <= CFG.MAX_EDGE) cands.push({ m, product, spot, sig, mins, ...s, edge });
       }
     }
   }
   cands.sort((x, y) => y.edge - x.edge);
+  const openBefore = S.sc.open.length;
   const used = new Set(); let sent = 0;
   for (const c of cands) {
     if (sent >= CFG.MAX_ALERTS_PER_RUN) break;
@@ -262,6 +273,7 @@ async function scan(fast) {
     let count = Math.floor(budget / c.ask);
     while (count > 0 && count * c.ask + feeTotal(count, c.ask) > budget) count--;
     if (count < 1) continue;
+    S.sc.open.push({ t: c.m.ticker, s: c.side[0], p: Math.round(c.p * 1000) / 1000, a: c.ask, c: Date.parse(c.m.close_time) }); if (S.sc.open.length > 25) S.sc.open.shift();
     used.add(c.m.event_ticker); S.recentAlerts[c.m.ticker] = Date.now(); S.recentAlerts['E:' + c.m.event_ticker] = Date.now(); sent++;
     const cost = count * c.ask + feeTotal(count, c.ask);
     const coin = c.product.split('-')[0];
@@ -270,7 +282,7 @@ async function scan(fast) {
     const info = `${coin} ${isFast(c.m.event_ticker.split('-')[0]) ? strike : (c.m.yes_sub_title || strike)} at ${timeCT(c.m.close_time)} (closes in ${Math.round(c.mins)} min)\n\n` +
       `👉 BUY ${c.side.toUpperCase()}: ${count} @ ${cents(c.ask)} = ${money(cost)}\n` +
       `Win: +${money(count - cost)} · Lose: −${money(cost)}\n` +
-      `Bot ${(c.p * 100).toFixed(0)}% vs market ${(c.ask * 100).toFixed(0)}% (edge ${(c.edge * 100).toFixed(1)}¢)\n` +
+      `Win chance: bot ${(c.p * 100).toFixed(0)}% (model ${(c.raw * 100).toFixed(0)}%, market ${(c.mkt * 100).toFixed(0)}%) vs price ${(c.ask * 100).toFixed(0)}¢ → edge ${(c.edge * 100).toFixed(1)}¢\n` +
       `${coin} now ${money(c.spot)} · Today ${money(a.spent)}/${money(a.dayCap)} · Profit ${money(a.profit)}`;
     if (S.unlocked) {
       const r = await placeBuy({ ticker: c.m.ticker, side: c.side, count, price: c.ask });
@@ -281,6 +293,7 @@ async function scan(fast) {
       S.pending[id] = { ticker: c.m.ticker, side: c.side, price: c.ask, count, created: Date.now() };
       let okData = `o|${c.m.ticker}|${c.side[0]}|${Math.round(c.ask * 100)}|${count}`, noData = `x|${c.m.ticker}`;
       if (Buffer.byteLength(okData) > 64) { okData = `ok|${id}`; noData = `no|${id}`; }
+      if (S.sc.open.length !== openBefore) saveSettings().catch(() => {});
       await say(`🔔 TRADE IDEA — tap within ${CFG.ALERT_TTL_MIN} min\n\n` + info, {
         reply_markup: { inline_keyboard: [[{ text: `✅ Buy ${money(cost)}`, callback_data: okData }, { text: '❌ Skip', callback_data: noData }]] },
       });
@@ -452,8 +465,13 @@ async function onUpdate(u) {
   if (t.startsWith('/lock')) { S.unlocked = false; S.manualLock = true; await saveSettings(); return say(`🔒 Confirm mode locked. /auto to allow auto-trading at +$${CFG.UNLOCK_PROFIT} again.`); }
   if (t.startsWith('/auto')) { S.manualLock = false; await saveSettings(); return say(`Auto-trading will turn on at +$${CFG.UNLOCK_PROFIT} profit.`); }
   if (t.startsWith('/scan')) { await say('🔎 Scanning now…'); await tick(); return say(S.lastError ? '⚠️ ' + S.lastError : '✅ Scan done. No alert = no good trade right now.'); }
+  if (t.startsWith('/stats')) {
+    const c = S.sc, n = c.n;
+    if (!n) return say(`📈 Scorecard: no alerts settled yet (${c.open.length} waiting). Each alert is scored after its market closes, whether or not you bought it.`);
+    return say(`📈 Scorecard (every alert, 1 contract each)\nSettled: ${n} · waiting: ${c.open.length}\nBot predicted wins: ${(c.sumP / n * 100).toFixed(0)}% · actual: ${(c.wins / n * 100).toFixed(0)}%\nPaper profit: ${c.pnl >= 0 ? '+' : '−'}${money(Math.abs(c.pnl))} (${(c.pnl / n * 100).toFixed(1)}¢ per alert)\nAccuracy score (Brier, lower is better): ${(c.brier / n).toFixed(3)}\n${n < 50 ? 'Under 50 results is mostly luck — judge it after 50+.' : ''}`);
+  }
   if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins btc,eth,sol');
-  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol');
+  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol');
   if (t.startsWith('/set')) { const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
   if (t.startsWith('/rollback')) return rollback();
   if (t.startsWith('/claude') || !t.startsWith('/')) {
@@ -488,7 +506,7 @@ http.createServer((rq, rs) => {
   if (TG_TOKEN && PUBLIC_URL) { const r = await tg('setWebhook', { url: PUBLIC_URL + HOOK, secret_token: HOOK_SECRET, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true }); log('webhook', JSON.stringify(r)); }
   if (TG_TOKEN) await tg('setMyCommands', { commands: [
     { command: 'claude', description: 'Talk to Claude / ask for changes' }, { command: 'status', description: 'Money, profit & mode' },
-    { command: 'settings', description: 'See all settings' }, { command: 'set', description: 'Change a setting: /set trade 3' },
+    { command: 'stats', description: 'Prediction scorecard' }, { command: 'settings', description: 'See all settings' }, { command: 'set', description: 'Change a setting: /set trade 3' },
     { command: 'scan', description: 'Scan for trades now' }, { command: 'pause', description: 'Stop trading' }, { command: 'resume', description: 'Start again' },
     { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'rollback', description: 'Undo last code change' },
     { command: 'help', description: 'All commands' }] });
@@ -539,9 +557,24 @@ async function repairKey() {
   SIGN_KEY = original; log('KEYREPAIR no match');
 }
 
+async function scoreAlerts() {
+  const due = S.sc.open.filter(o => Date.now() > o.c + 3 * 60e3);
+  let changed = false;
+  for (const o of due) {
+    let m; try { m = (await kalshi('GET', `/markets/${o.t}`)).market || {}; } catch (e) { continue; }
+    const res = String(m.result || '').toLowerCase();
+    if (res !== 'yes' && res !== 'no') { if (Date.now() > o.c + 6 * 3600e3) { S.sc.open = S.sc.open.filter(x => x !== o); changed = true; } continue; }
+    const win = (o.s === 'y' ? 'yes' : 'no') === res ? 1 : 0;
+    S.sc.n++; S.sc.wins += win; S.sc.sumP += o.p; S.sc.brier += (o.p - win) ** 2;
+    S.sc.pnl += win - o.a - 0.07 * o.a * (1 - o.a); // per 1 contract, after fee
+    S.sc.open = S.sc.open.filter(x => x !== o); changed = true;
+  }
+  if (changed) await saveSettings();
+}
+
 async function tick(fast = false) {
   if (S.busy) return; S.busy = true;
-  try { await scan(fast); if (!fast) await scan(true); S.lastScan = new Date().toISOString(); S.lastError = null; S.errCount = 0; }
+  try { await scan(fast); if (!fast) { await scan(true); await scoreAlerts(); } S.lastScan = new Date().toISOString(); S.lastError = null; S.errCount = 0; }
   catch (e) {
     S.lastError = e.message.slice(0, 200); S.errCount = (S.errCount || 0) + 1; log('scan error', e.message);
     if (S.errCount >= 3 && Date.now() - (S.lastErrAlert || 0) > 30 * 60e3) { S.lastErrAlert = Date.now(); say('⚠️ Scanning keeps failing: ' + S.lastError); }
