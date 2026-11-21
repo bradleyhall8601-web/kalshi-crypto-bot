@@ -290,16 +290,21 @@ function bookDepth(m, side, limit) {
   return opp.filter(([px]) => 1 - px <= limit + 1e-9).reduce((a, x) => a + x[1], 0);
 }
 // highest price worth paying: up to 1¢ above the ask, but only while the edge after fees stays >= need
+// Kalshi only accepts whole-cent order prices, so limits are whole cents.
+const ceilCent = x => Math.ceil(x * 100 - 1e-9) / 100;
 function bestLimit(p, ask, need, grace = 0.01) {
   const feePer = q => 0.07 * q * (1 - q) + 0.005;
-  let limit = Math.min(0.99, Math.round((ask + grace) * 1000) / 1000);
-  while (limit > ask && limit + feePer(limit) > p - need) limit = Math.round((limit - 0.001) * 1000) / 1000;
-  return ask + feePer(ask) > p - need ? null : limit;
+  const floor = ceilCent(ask);                                   // lowest valid price that can still fill
+  if (floor > 0.99 || floor + feePer(floor) > p - need) return null;
+  let limit = Math.max(floor, Math.min(0.99, Math.floor((ask + grace) * 100 + 1e-9) / 100)); // never more than ask + grace
+  while (limit > floor && limit + feePer(limit) > p - need) limit = Math.round((limit - 0.01) * 100) / 100;
+  return limit;
 }
 async function placeBuy({ ticker, side, count, price, auto = false }) {
   const m = (await kalshi('GET', `/markets/${ticker}`)).market || {};
   const idx = Number.isInteger(m.exchange_index) ? m.exchange_index : 0;
   await ensureShardFunds(idx, count * price + feeTotal(count, price) + 0.02);
+  price = Math.round(price * 100) / 100; // whole cents only
   const yesPrice = side === 'yes' ? price : 1 - price;
   const body = {
     ticker, side: side === 'yes' ? 'bid' : 'ask',
@@ -488,6 +493,8 @@ async function scan(fast) {
     if (autoFast && !S.unlocked) {
       if (c.edge < CFG.AUTO_EDGE) continue;                       // auto needs the bigger edge
       limit = bestLimit(c.p, c.ask, CFG.AUTO_EDGE / 2, CFG.AUTO_GRACE); if (limit === null) continue;
+    } else if (auto) {
+      limit = bestLimit(c.p, c.ask, CFG.MIN_EDGE / 2, fastSeries ? CFG.AUTO_GRACE : 0.01); if (limit === null) continue;
     }
     // size within: per-trade cap, today's remaining budget, AND the cash actually in the wallet (fees + slippage included)
     const worst = limit || Math.min(c.ask + CFG.MAX_SLIPPAGE, 0.99);
@@ -712,8 +719,9 @@ async function onUpdate(u) {
     const other = v.reasons.filter(r => !/^edge .* below|^price .* outside/.test(r));
     if (other.length) return done('Not bought — conditions changed', `🛑 Live re-check failed: ${other.join('; ')}. Not bought.`);
     // limit: up to 1¢ above the live ask, but never past the price where the edge disappears
-    let limit = Math.min(0.99, ask + 0.02);
-    while (limit > ask && limit + feePer(limit) > fairMax) limit = Math.round((limit - 0.001) * 1000) / 1000;
+    const lim0 = bestLimit(v.p, ask, CFG.MIN_EDGE / 2, 0.02);
+    if (lim0 === null) return done('No edge left', `⚠️ No edge left at today's price (bot's fair value ~${cents(v.p)}). Not bought.`);
+    let limit = lim0;
     // worst-case cost (price can tick up to the limit) must fit the per-trade cap, today's budget and the wallet
     const worstCost = n => n * limit + feeTotal(n, limit);
     const room = Math.min(a.tradeCap, a.dayCap - a.spent, a.cash - 0.02);

@@ -80,6 +80,7 @@ global.fetch = async (url, o = {}) => {
     if (path.endsWith('/portfolio/orders')) return J({ error: { code: 'deprecated_v1_order_endpoint' } }, 410);
     if (path.endsWith('/portfolio/events/orders')) {
       const m = (W.live && W.live[b.ticker]) || W.markets[b.ticker];
+      if (Math.abs(Number(b.price) * 100 - Math.round(Number(b.price) * 100)) > 1e-6) return J({ error: { code: 'invalid_price', message: 'invalid price' } }, 400); // like Kalshi
       const yesPx = Number(b.price), count = Number(b.count);
       const costPer = b.side === 'bid' ? yesPx : 1 - yesPx;
       const idx = b.exchange_index ?? 0;

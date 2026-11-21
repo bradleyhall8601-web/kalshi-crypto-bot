@@ -304,6 +304,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(/Cash:/.test(lastMsg().text), 'rate-limited Kalshi calls retried and succeed');
 
   console.log('\n14. Auto mode');
+  await send(post, '/set day 50'); await wait(200);
   W.settlements = [{ revenue: 20000, yes_total_cost: 5000, no_total_cost: 0, fee_cost: '0.5000' }]; // +$149.50 profit (fee_cost given as dollar text)
   clearMarkets(); W.shards = { 0: 50, 2: 0 };
   const mA = market('KXBTCD', 'btc', 40, 60041, 0.16);
