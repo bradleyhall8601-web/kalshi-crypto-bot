@@ -232,8 +232,8 @@ async function scan(fast) {
     const cost = count * c.ask + feeTotal(count, c.ask);
     const coin = c.product.split('-')[0];
     const st = String(c.m.strike_type);
-    const strike = isFast(c.m.event_ticker.split('-')[0]) ? `UP from ${money(num(c.m.floor_strike))} (15-min)` : st === 'between' ? `${money(num(c.m.floor_strike))}–${money(num(c.m.cap_strike))}` : st.startsWith('less') ? `below ${money(num(c.m.cap_strike))}` : `${money(num(c.m.floor_strike))} or above`;
-    const info = `${coin} ${c.m.yes_sub_title || strike} at ${timeCT(c.m.close_time)} (closes in ${Math.round(c.mins)} min)\n\n` +
+    const strike = isFast(c.m.event_ticker.split('-')[0]) ? `UP from ${money(num(c.m.floor_strike))} (15-min) — YES = up, NO = down` : st === 'between' ? `${money(num(c.m.floor_strike))}–${money(num(c.m.cap_strike))}` : st.startsWith('less') ? `below ${money(num(c.m.cap_strike))}` : `${money(num(c.m.floor_strike))} or above`;
+    const info = `${coin} ${isFast(c.m.event_ticker.split('-')[0]) ? strike : (c.m.yes_sub_title || strike)} at ${timeCT(c.m.close_time)} (closes in ${Math.round(c.mins)} min)\n\n` +
       `👉 BUY ${c.side.toUpperCase()}: ${count} @ ${cents(c.ask)} = ${money(cost)}\n` +
       `Win: +${money(count - cost)} · Lose: −${money(cost)}\n` +
       `Bot ${(c.p * 100).toFixed(0)}% vs market ${(c.ask * 100).toFixed(0)}% (edge ${(c.edge * 100).toFixed(1)}¢)\n` +
