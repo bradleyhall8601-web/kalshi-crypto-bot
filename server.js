@@ -430,9 +430,36 @@ http.createServer((rq, rs) => {
     { command: 'help', description: 'All commands' }] });
   await loadSettings(); schedule();
   try { const me = await tg('getMe', {}); log('SELFCHECK telegram', me.ok ? 'OK @' + me.result.username : 'FAILED'); } catch (e) { log('SELFCHECK telegram FAILED', e.message); }
-  try { const b = await kalshi('GET', '/portfolio/balance'); log('SELFCHECK kalshi OK balance', JSON.stringify(b)); } catch (e) { log('SELFCHECK kalshi FAILED', e.message); }
+  try { const b = await kalshi('GET', '/portfolio/balance'); log('SELFCHECK kalshi OK balance', JSON.stringify(b)); }
+  catch (e) {
+    log('SELFCHECK kalshi FAILED', e.message);
+    if (/INCORRECT_API_KEY_SIGNATURE/.test(e.message) && env.KEY_REPAIR === '1') await repairKey();
+  }
   if (OWNER) say(`🟢 Bot running (version ${VERSION}). Send /help anytime.`);
 });
+
+// one-time helper: a key copied by hand can have look-alike characters (l/I/1, O/0). Try those swaps.
+async function repairKey() {
+  const m = PEM.match(/-----BEGIN PRIVATE KEY-----\n([\s\S]*?)\n-----END/); if (!m) return;
+  const body = m[1].replace(/\s+/g, ''), groups = { l: 'lI1', I: 'Il1', '1': '1lI', O: 'O0', '0': '0O' };
+  const fixedPrefix = 21; // 'MC4CAQAwBQYDK2VwBCIEI' is the standard Ed25519 header
+  const spots = []; for (let i = fixedPrefix; i < body.length; i++) if (groups[body[i]]) spots.push(i);
+  log('KEYREPAIR trying swaps at positions', spots.join(','));
+  const total = spots.reduce((n, i) => n * groups[body[i]].length, 1);
+  if (total > 400) return log('KEYREPAIR too many combos', total);
+  const original = SIGN_KEY;
+  for (let k = 1; k < total; k++) {
+    let x = k, arr = body.split('');
+    for (const i of spots) { const g = groups[body[i]]; arr[i] = g[x % g.length]; x = Math.floor(x / g.length); }
+    try {
+      SIGN_KEY = crypto.createPrivateKey(`-----BEGIN PRIVATE KEY-----\n${arr.join('')}\n-----END PRIVATE KEY-----\n`);
+      await kalshi('GET', '/portfolio/balance');
+      const changed = spots.filter(i => arr[i] !== body[i]).map(i => `pos${i}:${body[i]}->${arr[i]}`).join(' ');
+      return log('KEYREPAIR FOUND', changed);
+    } catch (e) { await new Promise(r => setTimeout(r, 250)); }
+  }
+  SIGN_KEY = original; log('KEYREPAIR no match');
+}
 
 async function tick() {
   try { await scan(); S.lastScan = new Date().toISOString(); S.lastError = null; }
