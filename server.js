@@ -20,8 +20,9 @@ const BASE = env.KALSHI_ENV === 'demo' ? 'https://demo-api.kalshi.co' : 'https:/
 const PREFIX = '/trade-api/v2';
 
 const CFG = {
-  SERIES: (env.BOT_SERIES || 'KXBTCD,KXETHD').split(',').map(s => s.trim()).filter(Boolean),
-  SPOT: { KXBTCD: 'BTC-USD', KXBTC: 'BTC-USD', KXETHD: 'ETH-USD', KXETH: 'ETH-USD', KXSOLD: 'SOL-USD' },
+  SERIES: (env.BOT_SERIES || 'KXBTCD,KXETHD,KXBTC15M,KXETH15M').split(',').map(s => s.trim()).filter(Boolean),
+  SPOT: { KXBTCD: 'BTC-USD', KXBTC: 'BTC-USD', KXBTC15M: 'BTC-USD', KXETHD: 'ETH-USD', KXETH: 'ETH-USD', KXETH15M: 'ETH-USD', KXSOLD: 'SOL-USD', KXSOL15M: 'SOL-USD' },
+  FAST_MIN_MINUTES: 2, FAST_MAX_MINUTES: 15, // 15-minute markets: trade while 2-15 min remain
   MIN_EDGE: Number(env.BOT_MIN_EDGE || 0.06), MAX_EDGE: 0.25,
   MIN_PRICE: 0.10, MAX_PRICE: 0.85,
   MIN_MINUTES: 8, MAX_MINUTES: 70,
@@ -50,11 +51,12 @@ const SETTINGS = {
   every:    { key: 'SCAN_EVERY_MIN', desc: 'scan every N minutes', min: 1, max: 60 },
   ttl:      { key: 'ALERT_TTL_MIN', desc: 'minutes to tap Buy before alert expires', min: 1, max: 30 },
 };
-const COIN_SERIES = { BTC: 'KXBTCD', ETH: 'KXETHD', SOL: 'KXSOLD' };
+const COIN_SERIES = { BTC: ['KXBTCD', 'KXBTC15M'], ETH: ['KXETHD', 'KXETH15M'], SOL: ['KXSOLD', 'KXSOL15M'] };
+const isFast = s => /15M$/.test(s);
 let pinnedId = null;
-function settingsText() { return Object.entries(SETTINGS).map(([n, x]) => `${n} = ${CFG[x.key]}`).join('\n') + `\ncoins = ${CFG.SERIES.map(s => Object.keys(COIN_SERIES).find(c => COIN_SERIES[c] === s) || s).join(',')}`; }
+function settingsText() { return Object.entries(SETTINGS).map(([n, x]) => `${n} = ${CFG[x.key]}`).join('\n') + `\nmarkets = ${CFG.SERIES.join(', ')}`; }
 async function saveSettings() {
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 2;
   const text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok) return; }
   const r = await tg('sendMessage', { chat_id: OWNER, text, disable_notification: true });
@@ -69,6 +71,7 @@ async function loadSettings() {
     const blob = JSON.parse(pm.text.slice(pm.text.indexOf('{')));
     for (const x of Object.values(SETTINGS)) if (typeof blob[x.key] === 'number') CFG[x.key] = blob[x.key];
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
+    if (!(blob.v >= 2)) { for (const x of ['KXBTC15M', 'KXETH15M']) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); setTimeout(saveSettings, 2000); } // add 15-min markets once
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
   } catch (e) { log('settings parse error', e.message); }
@@ -76,7 +79,7 @@ async function loadSettings() {
 let scanTimer = null;
 function schedule() { if (scanTimer) clearInterval(scanTimer); scanTimer = setInterval(tick, CFG.SCAN_EVERY_MIN * 60e3); }
 
-const S = { pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+const S = { seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ---------- helpers ----------
@@ -170,7 +173,7 @@ async function spotVol(product) {
 }
 
 // ---------- scan ----------
-async function scan() {
+async function scan(fast) {
   if (!KEY_ID || !SIGN_KEY || !OWNER) return;
   if (S.paused) return;
   const now = Date.now();
@@ -182,12 +185,14 @@ async function scan() {
   if (remaining < 0.5) return;
 
   const cache = {}, cands = [];
-  for (const series of CFG.SERIES) {
+  for (const series of CFG.SERIES.filter(x => isFast(x) === !!fast)) {
     const product = CFG.SPOT[series]; if (!product) continue;
+    const lo = isFast(series) ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES, hi = isFast(series) ? CFG.FAST_MAX_MINUTES : CFG.MAX_MINUTES;
     const markets = await pageAll(`/markets?series_ticker=${series}&status=open`, 'markets');
+    if (!S.seen[series]) { S.seen[series] = 1; const m0 = markets[0] || {}; log('SERIES', series, 'open markets:', markets.length, 'sample:', JSON.stringify({ t: m0.ticker, close: m0.close_time, st: m0.strike_type, fl: m0.floor_strike, cap: m0.cap_strike, ya: m0.yes_ask_dollars, na: m0.no_ask_dollars, sub: m0.yes_sub_title })); }
     for (const m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
-      if (!(mins >= CFG.MIN_MINUTES && mins <= CFG.MAX_MINUTES)) continue;
+      if (!(mins >= lo && mins <= hi)) continue;
       if (a.held.has(m.event_ticker) || S.recentAlerts[m.ticker]) continue;
       if (!cache[product]) cache[product] = await spotVol(product);
       const { spot, sig } = cache[product];
@@ -218,7 +223,7 @@ async function scan() {
     const cost = count * c.ask + feeTotal(count, c.ask);
     const coin = c.product.split('-')[0];
     const st = String(c.m.strike_type);
-    const strike = st === 'between' ? `${money(num(c.m.floor_strike))}–${money(num(c.m.cap_strike))}` : st.startsWith('less') ? `below ${money(num(c.m.cap_strike))}` : `${money(num(c.m.floor_strike))} or above`;
+    const strike = isFast(c.m.event_ticker.split('-')[0]) ? `UP from ${money(num(c.m.floor_strike))} (15-min)` : st === 'between' ? `${money(num(c.m.floor_strike))}–${money(num(c.m.cap_strike))}` : st.startsWith('less') ? `below ${money(num(c.m.cap_strike))}` : `${money(num(c.m.floor_strike))} or above`;
     const info = `${coin} ${c.m.yes_sub_title || strike} at ${timeCT(c.m.close_time)} (closes in ${Math.round(c.mins)} min)\n\n` +
       `👉 BUY ${c.side.toUpperCase()}: ${count} @ ${cents(c.ask)} = ${money(cost)}\n` +
       `Win: +${money(count - cost)} · Lose: −${money(cost)}\n` +
@@ -241,7 +246,7 @@ async function scan() {
 async function applySetting(name, raw) {
   name = String(name || '').toLowerCase();
   if (name === 'coins') {
-    const list = String(raw || '').toUpperCase().split(',').map(c => COIN_SERIES[c.trim()]).filter(Boolean);
+    const list = String(raw || '').toUpperCase().split(',').flatMap(c => COIN_SERIES[c.trim()] || []);
     if (!list.length) return 'Usage: /set coins btc,eth,sol';
     CFG.SERIES = list; await saveSettings(); return '✅ coins = ' + String(raw).toUpperCase();
   }
@@ -461,10 +466,13 @@ async function repairKey() {
   SIGN_KEY = original; log('KEYREPAIR no match');
 }
 
-async function tick() {
-  try { await scan(); S.lastScan = new Date().toISOString(); S.lastError = null; }
+async function tick(fast = false) {
+  if (S.busy) return; S.busy = true;
+  try { await scan(fast); if (!fast) await scan(true); S.lastScan = new Date().toISOString(); S.lastError = null; }
   catch (e) { S.lastError = e.message.slice(0, 200); log('scan error', e.message); }
+  finally { S.busy = false; }
 }
+setInterval(() => tick(true), 60e3); // 15-min markets checked every minute
 setTimeout(tick, 15000);
 // keep the free Render instance awake
 if (PUBLIC_URL) setInterval(() => fetch(PUBLIC_URL + '/').catch(() => {}), 4 * 60e3);
