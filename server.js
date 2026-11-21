@@ -22,8 +22,9 @@ const PREFIX = '/trade-api/v2';
 const CFG = {
   SERIES: (env.BOT_SERIES || 'KXBTCD,KXETHD,KXBTC15M,KXETH15M').split(',').map(s => s.trim()).filter(Boolean),
   SPOT: { KXBTCD: 'BTC-USD', KXBTC: 'BTC-USD', KXBTC15M: 'BTC-USD', KXETHD: 'ETH-USD', KXETH: 'ETH-USD', KXETH15M: 'ETH-USD', KXSOLD: 'SOL-USD', KXSOL15M: 'SOL-USD' },
-  FAST_MIN_MINUTES: 2, FAST_MAX_MINUTES: 15, // 15-minute markets: trade while 2-15 min remain
+  FAST_MIN_MINUTES: 1.5, FAST_MAX_MINUTES: 15, // 15-minute markets: trade while 1.5-15 min remain
   MIN_EDGE: Number(env.BOT_MIN_EDGE || 0.04), MAX_EDGE: 0.25, MAX_DISAGREE: 0.18,
+  SHOCK_PCT: 0.006, // a 5-min move must be > 0.6% (and > 4x normal) to count as a shock
   FAST_TTL_MIN: 1.5, // 15-min markets move in seconds: alerts expire fast
   AUTO_FAST: 1,       // auto-trade the 15-minute markets (no tap needed)
   AUTO_EDGE: 0.05,    // auto trades need a slightly bigger edge than tap alerts (no human double-check)
@@ -100,10 +101,10 @@ async function loadSettings() {
   } catch (e) { log('settings parse error', e.message); }
 }
 let scanTimer = null;
-function schedule() { if (scanTimer) clearInterval(scanTimer); if (env.BOT_TEST !== '1') scanTimer = setInterval(tick, CFG.SCAN_EVERY_MIN * 60e3); }
+function schedule() { if (scanTimer) clearInterval(scanTimer); if (env.BOT_TEST !== '1') scanTimer = setInterval(() => tick(false), CFG.SCAN_EVERY_MIN * 60e3); }
 
 const newLed = day => ({ day, spent: 0, fast: 0, autoPnl: 0, streak: 0, fastOff: false, auto: [] });
-const S = { candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+const S = { stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
@@ -142,7 +143,7 @@ const d = (o, k) => {
 };
 const cnt = (o, k = 'count') => { const a = num(o[k + '_fp']); return a === a ? a : (num(o[k]) || 0); };
 const feeTotal = (c, p) => Math.ceil(0.07 * c * p * (1 - p) * 100 - 1e-9) / 100;
-const money = x => '$' + Number(x).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const money = x => (Number(x) < -0.004 ? '−$' : '$') + Math.abs(Number(x)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const cents = x => { const v = Math.round(x * 1000) / 10; return (Number.isInteger(v) ? v : v.toFixed(1)) + '¢'; };
 const timeCT = iso => new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, hour: 'numeric', minute: '2-digit' }).format(new Date(iso)) + ' CT';
 function startOfTodayCT() {
@@ -320,7 +321,7 @@ async function coinState(product) {
   if (st.ageSec > 30) st.problems.push(`live price ${st.ageSec}s old`);
   if (st.candleLagSec > 600) st.problems.push(`price history ${Math.round(st.candleLagSec / 60)} min behind`);
   if (st.spreadPct > 0.002) st.problems.push(`exchanges disagree ${(st.spreadPct * 100).toFixed(2)}%`);
-  if (Math.abs(st.z5) > 3) st.problems.push(`sudden ${st.r5 > 0 ? 'spike' : 'drop'} ${(st.r5 * 100).toFixed(2)}% in 5 min`);
+  if (Math.abs(st.z5) > 4 && Math.abs(st.r5) > CFG.SHOCK_PCT) st.problems.push(`sudden ${st.r5 > 0 ? 'spike' : 'drop'} ${(st.r5 * 100).toFixed(2)}% in 5 min`);
   if (sig15 > 2.5 * sig5h) st.problems.push('volatility spiking');
   return st;
 }
@@ -328,10 +329,9 @@ async function marketConditions() {
   const [btc, eth] = await Promise.all([coinState('BTC-USD'), coinState('ETH-USD')]);
   const out = { 'BTC-USD': btc, 'ETH-USD': eth };
   // crypto moves together: a shock in either coin blocks both
-  for (const [k, o] of [['BTC-USD', eth], ['ETH-USD', btc]]) {
-    const shock = o.problems.filter(x => /sudden|spiking/.test(x));
-    if (shock.length) out[k].problems.push(`${o.product.split('-')[0]} ${shock[0]}`);
-  }
+  const own = { 'BTC-USD': btc.problems.filter(x => /sudden|spiking/.test(x)), 'ETH-USD': eth.problems.filter(x => /sudden|spiking/.test(x)) };
+  if (own['ETH-USD'].length) btc.problems.push(`ETH ${own['ETH-USD'][0]}`);
+  if (own['BTC-USD'].length) eth.problems.push(`BTC ${own['BTC-USD'][0]}`);
   return out;
 }
 const pct = x => Math.abs(x) < 5e-5 ? '0.00%' : (x > 0 ? '+' : '−') + Math.abs(x * 100).toFixed(2) + '%';
@@ -406,12 +406,17 @@ async function scan(fast) {
       if (prev.told) await say(`✅ ${coinName} conditions clear again — trading resumed.`);
       S.blk[product] = { on: false, t: prev.t };
     }
+    if (cond[product].problems.length && isFast(series)) S.stats.last15[series] = { blocked: cond[product].problems.join('; '), at: Date.now() };
     if (cond[product].problems.length) { if (env.BOT_DEBUG === '1') log('COND', product, cond[product].problems.join('; '));
       if (!S.condWarn || Date.now() - S.condWarn > 15 * 60e3) { S.condWarn = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; ')); } continue; }
     for (const m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
       if (!(mins >= lo && mins <= hi)) continue;
-      if (a.held.has(m.event_ticker) || S.sc.ev[m.event_ticker]) continue; // ONE alert per market window, ever — next one only when a new window opens
+      if (a.held.has(m.event_ticker) || S.sc.ev[m.event_ticker]) { if (isFast(series)) S.stats.last15[series] = { t: m.ticker, done: true, mins, at: Date.now() }; continue; } // ONE trade per window
+      if (isFast(series)) {
+        const vs = evaluate(m, cond[product], now), best = vs.slice().sort((x, y) => y.edge - x.edge)[0];
+        if (best) S.stats.last15[series] = { t: m.ticker, side: best.side, raw: best.raw, mkt: best.mkt, p: best.p, ask: best.ask, edge: best.edge, mins, reasons: best.reasons.concat(best.edge < CFG.AUTO_EDGE && CFG.AUTO_FAST === 1 && best.ok ? [`edge ${(best.edge * 100).toFixed(1)}¢ below auto bar ${(CFG.AUTO_EDGE * 100).toFixed(0)}¢`] : []), at: Date.now() };
+      }
       for (const v of evaluate(m, cond[product], now)) if (env.BOT_DEBUG === '1') log('EVAL', m.ticker, v.side, JSON.stringify({ raw: v.raw, mkt: v.mkt, p: v.p, ask: v.ask, edge: v.edge, reasons: v.reasons }));
       for (const v of evaluate(m, cond[product], now)) if (v.ok) cands.push({ m, product, ...v, cond: condLine(cond[product], cond[product === 'BTC-USD' ? 'ETH-USD' : 'BTC-USD']) });
     }
@@ -526,7 +531,7 @@ async function runTool(name, input) {
     const a = input.action;
     if (a === 'pause') S.paused = true; else if (a === 'resume') S.paused = false;
     else if (a === 'lock') { S.unlocked = false; S.manualLock = true; } else if (a === 'auto') S.manualLock = false;
-    else if (a === 'scan') { await tick(); return S.lastError ? 'scan error: ' + S.lastError : 'scan done'; }
+    else if (a === 'scan') { await tick(false, true); return S.lastError ? 'scan error: ' + S.lastError : 'scan done'; }
     await saveSettings(); return 'done: ' + a;
   }
   if (name === 'get_status') { const a = await account(); return JSON.stringify({ mode: S.paused ? 'paused' : S.unlocked ? 'auto' : 'confirm', cash: a.cash, profit: a.profit, spentToday: a.spent, dayCap: a.dayCap, tradeCap: a.tradeCap, settledMarkets: a.settledCount, openAlerts: Object.keys(S.pending).length, lastScan: S.lastScan, lastError: S.lastError, version: VERSION }); }
@@ -662,19 +667,33 @@ async function onUpdate(u) {
   if (t.startsWith('/resume')) { S.paused = false; await saveSettings(); return say('▶️ Running.'); }
   if (t.startsWith('/lock')) { S.unlocked = false; S.manualLock = true; await saveSettings(); return say(`🔒 Confirm mode locked. /auto to allow auto-trading at +$${CFG.UNLOCK_PROFIT} again.`); }
   if (/^\/auto(@\w+)?$/.test(t)) { S.manualLock = false; await saveSettings(); return say(`Auto-trading will turn on at +$${CFG.UNLOCK_PROFIT} profit.`); }
+  if (env.BOT_TEST === '1' && t === '/_fasttick') { await tick(true); return; }
+  if (t.startsWith('/why')) {
+    const st = S.stats, f5 = st.fast.filter(x => Date.now() - x < 5 * 60e3).length;
+    const lines = [`🔍 Live check — 15-min scans in last 5 min: ${f5} ${f5 >= 25 ? '✅' : '⚠️'} (target 30) · auto 15-min ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED today' : 'ON'}`];
+    for (const ser of CFG.SERIES.filter(isFast)) {
+      const x = st.last15[ser], coin = ser.replace('KX', '').replace('15M', '');
+      if (!x) { lines.push(`\n${coin}: no open 15-min market seen yet`); continue; }
+      const age = Math.round((Date.now() - x.at) / 1000);
+      if (x.blocked) lines.push(`\n${coin}: ⏸ blocked — ${x.blocked} (${age}s ago)`);
+      else if (x.done) lines.push(`\n${coin}: ✅ already traded/alerted this window (${Math.round(x.mins)} min left)`);
+      else lines.push(`\n${coin} ${x.side.toUpperCase()} @ ${cents(x.ask)} · ${x.mins.toFixed(1)} min left (${age}s ago)\nbot ${Math.round(x.p * 100)}% (model ${Math.round(x.raw * 100)}%, market ${Math.round(x.mkt * 100)}%) → edge ${(x.edge * 100).toFixed(1)}¢\n${x.reasons.length ? 'Not trading: ' + x.reasons.join('; ') : '👉 Qualifies — trading'}`);
+    }
+    return say(lines.join('\n'));
+  }
   if (t.startsWith('/auto15')) {
     const on = !/off|0|stop/.test(t);
     CFG.AUTO_FAST = on ? 1 : 0; if (on) { S.led.fastOff = false; S.led.streak = 0; } await saveSettings();
     return say(on ? `🤖 Auto 15-min trading ON: up to ${money(CFG.SMALL_TRADE)}/trade, ${money(CFG.FAST_DAY)}/day, stops after ${money(CFG.FAST_MAX_LOSS)} loss or ${CFG.FAST_STREAK} losses in a row.` : '⏸ Auto 15-min trading OFF. 15-min ideas come as tap alerts.');
   }
-  if (t.startsWith('/scan')) { await say('🔎 Scanning now…'); await tick(); return say(S.lastError ? '⚠️ ' + S.lastError : '✅ Scan done. No alert = no good trade right now.'); }
+  if (t.startsWith('/scan')) { await say('🔎 Scanning now…'); await tick(false, true); return say(S.lastError ? '⚠️ ' + S.lastError : '✅ Scan done. No alert = no good trade right now.'); }
   if (t.startsWith('/stats')) {
     const c = S.sc, n = c.n;
     if (!n) return say(`📈 Scorecard: no alerts settled yet (${c.open.length} waiting). Each alert is scored after its market closes, whether or not you bought it.`);
     return say(`📈 Scorecard (every alert, 1 contract each)\nSettled: ${n} · waiting: ${c.open.length}\nBot predicted wins: ${(c.sumP / n * 100).toFixed(0)}% · actual: ${(c.wins / n * 100).toFixed(0)}%\nPaper profit: ${c.pnl >= 0 ? '+' : '−'}${money(Math.abs(c.pnl))} (${(c.pnl / n * 100).toFixed(1)}¢ per alert)\nAccuracy score (Brier, lower is better): ${(c.brier / n).toFixed(3)}\n${n < 50 ? 'Under 50 results is mostly luck — judge it after 50+.' : ''}`);
   }
   if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins btc,eth,sol');
-  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol');
+  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol');
   if (t.startsWith('/set')) { const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
   if (t.startsWith('/rollback')) return rollback();
   if (t.startsWith('/claude') || !t.startsWith('/')) {
@@ -711,7 +730,7 @@ http.createServer((rq, rs) => {
     { command: 'claude', description: 'Talk to Claude / ask for changes' }, { command: 'status', description: 'Money, profit & mode' },
     { command: 'stats', description: 'Prediction scorecard' }, { command: 'settings', description: 'See all settings' }, { command: 'set', description: 'Change a setting: /set trade 3' },
     { command: 'scan', description: 'Scan for trades now' }, { command: 'pause', description: 'Stop trading' }, { command: 'resume', description: 'Start again' },
-    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'rollback', description: 'Undo last code change' },
+    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'why', description: 'Why it is/isn\'t trading 15-min now' }, { command: 'rollback', description: 'Undo last code change' },
     { command: 'help', description: 'All commands' }] });
   await loadSettings(); schedule();
   try { const me = await tg('getMe', {}); log('SELFCHECK telegram', me.ok ? 'OK @' + me.result.username : 'FAILED'); } catch (e) { log('SELFCHECK telegram FAILED', e.message); }
@@ -795,18 +814,29 @@ async function scoreAlerts() {
   if (changed) await saveSettings();
 }
 
-async function tick(fast = false) {
-  if (S.busy) return; S.busy = true;
-  try { await scan(fast); if (!fast) { await scan(true); await scoreAlerts(); } S.lastScan = new Date().toISOString(); S.lastError = null; S.errCount = 0; }
+async function tick(fast = false, both = false) {
+  const lock = fast ? 'busyFast' : 'busySlow';
+  if (S[lock]) { S.stats.skipped[lock] = (S.stats.skipped[lock] || 0) + 1; return; }
+  S[lock] = true;
+  try {
+    if (fast) { await scan(true); S.stats.fast.push(Date.now()); }
+    else { await scan(false); await scoreAlerts(); S.stats.slow.push(Date.now()); if (both) { S.busyFast = true; try { await scan(true); } finally { S.busyFast = false; } } }
+    for (const k of ['fast', 'slow']) S.stats[k] = S.stats[k].filter(t => Date.now() - t < 15 * 60e3);
+    S.lastScan = new Date().toISOString(); S.lastError = null; S.errCount = 0;
+  }
   catch (e) {
     S.lastError = e.message.slice(0, 200); S.errCount = (S.errCount || 0) + 1; log('scan error', e.message);
     if (S.errCount >= 3 && Date.now() - (S.lastErrAlert || 0) > 30 * 60e3) { S.lastErrAlert = Date.now(); say('⚠️ Scanning keeps failing: ' + S.lastError); }
   }
-  finally { S.busy = false; }
+  finally { S[lock] = false; }
 }
 if (env.BOT_TEST !== '1') { // tests drive scans manually
-  setInterval(() => tick(true), 10e3); // 15-min markets checked every 10 seconds
-  setTimeout(tick, 15000);
+  setInterval(() => tick(true), 10e3); // 15-min markets checked every 10 seconds (own lock)
+  setTimeout(() => tick(false), 15000);
+  setInterval(() => { // heartbeat: proves scanning is continuous
+    const st = S.stats; log('HEARTBEAT', JSON.stringify({ fast5m: st.fast.filter(t => Date.now() - t < 5 * 60e3).length, slow5m: st.slow.filter(t => Date.now() - t < 5 * 60e3).length, skipped: st.skipped, lastError: S.lastError }));
+    if (CFG.AUTO_FAST === 1 && !S.paused && st.fast.filter(t => Date.now() - t < 5 * 60e3).length < 10 && Date.now() - (S.lastStallAlert || 0) > 30 * 60e3) { S.lastStallAlert = Date.now(); say('⚠️ 15-min scanning is falling behind (fewer than 10 checks in 5 min). Investigating automatically; last error: ' + (S.lastError || 'none')); }
+  }, 5 * 60e3);
 }
 // keep the free Render instance awake
 if (PUBLIC_URL) setInterval(() => fetch(PUBLIC_URL + '/').catch(() => {}), 4 * 60e3);

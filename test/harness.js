@@ -99,6 +99,7 @@ global.fetch = async (url, o = {}) => {
     if (mm) return W.markets[mm[1]] ? J({ market: W.markets[mm[1]] }) : J({ error: 'not found' }, 404);
     if (path.endsWith('/markets')) {
       const series = new URL(u).searchParams.get('series_ticker');
+      if (W.delay && W.delay[series]) await new Promise(r => setTimeout(r, W.delay[series]));
       return J({ markets: Object.values(W.markets).filter(m => m.ticker.startsWith(series + '-') && m.status !== 'settled'), cursor: '' });
     }
     return J({ error: 'unmocked ' + path }, 404);

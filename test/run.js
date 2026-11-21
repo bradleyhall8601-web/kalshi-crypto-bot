@@ -217,11 +217,37 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   await send(post, '/auto15 on'); await wait(200); ok(/Auto 15-min trading ON/.test(lastMsg().text), '/auto15 on');
   clearMarkets();
 
+  console.log('\n11c. 15-min scanning never waits for the hourly scan');
+  clearMarkets(); W.shards = { 0: 7, 2: 0 };
+  W.delay = { KXBTCD: 4000, KXETHD: 4000 };       // hourly market fetch is slow
+  market('KXBTC15M', 'btc', 9, 59975, -0.17, { m: { strike_type: 'greater_or_equal' } });
+  let of0 = W.orders.length;
+  send(post, '/scan');                              // slow scan starts (takes 8s+)
+  await wait(500);
+  const tFast = Date.now(); await send(post, '/_fasttick'); await wait(1500);
+  ok(W.orders.length === of0 + 1 && Date.now() - tFast < 4000, '15-min trade placed while the hourly scan was still running');
+  W.delay = {}; await wait(8000); clearMarkets();
+
+  console.log('\n11d. /why live diagnostics');
+  market('KXBTC15M', 'btc', 9, 59972, 0.03, { m: { strike_type: 'greater_or_equal' } });   // small edge: should explain
+  await send(post, '/_fasttick'); await wait(1200);
+  await send(post, '/why'); await wait(400);
+  ok(/15-min scans in last 5 min/.test(lastMsg().text) && /BTC .* · \d+\.\d min left/.test(lastMsg().text) && /Not trading: edge/.test(lastMsg().text), '/why explains the live 15-min verdict', lastMsg().text);
+  clearMarkets();
+
+  console.log('\n11a. Normal moves do not pause trading');
+  W.shock = { coin: 'eth', pct: 0.004 }; // 0.4% in 5 min: normal crypto noise
+  const mq = market('KXBTCD', 'btc', 40, 60036, 0.16); const nq = alerts().length, mq0 = msgs().length;
+  await send(post, '/scan'); await wait(900);
+  ok(!msgs().slice(mq0).some(m => /trading paused/.test(m.text)) && alerts().length === nq + 1, '0.4% ETH move does not pause trading');
+  W.shock = null; clearMarkets();
+
   console.log('\n11b. Condition reports');
   W.shock = { coin: 'btc', pct: -0.02 };
   market('KXBTCD', 'btc', 40, 60033, 0.16);
   await send(post, '/scan'); await wait(900);
   ok(msgs().some(m => /🚧 BTC trading paused — sudden drop/.test(m.text)), 'blocked conditions reported');
+  ok(!msgs().some(m => /BTC ETH|ETH BTC/.test(m.text)), 'no garbled cross-coin text');
   await send(post, '/scan'); await wait(900);
   ok(msgs().filter(m => /🚧 BTC trading paused/.test(m.text)).length === 1, 'block reported once, not every scan');
   W.shock = null;
