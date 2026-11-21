@@ -30,7 +30,7 @@ const CFG = {
   UNLOCK_PROFIT: 100, RELOCK_PROFIT: 50,
   SMALL_TRADE: 2, SMALL_DAY: 15, SCALED_TRADE_PCT: 0.02, SCALED_DAY_PCT: 0.10,
   MAX_ALERTS_PER_RUN: 2, ALERT_TTL_MIN: 4, MAX_SLIPPAGE: 0.02,
-  SCAN_EVERY_MIN: 5, TZ: 'America/Chicago',
+  SCAN_EVERY_MIN: 1, TZ: 'America/Chicago',
 };
 
 // ---------- live settings (changeable from Telegram, saved in a pinned message) ----------
@@ -56,7 +56,7 @@ const isFast = s => /15M$/.test(s);
 let pinnedId = null;
 function settingsText() { return Object.entries(SETTINGS).map(([n, x]) => `${n} = ${CFG[x.key]}`).join('\n') + `\nmarkets = ${CFG.SERIES.join(', ')}`; }
 async function saveSettings() {
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 2;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 3;
   const text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok) return; }
   const r = await tg('sendMessage', { chat_id: OWNER, text, disable_notification: true });
@@ -71,6 +71,7 @@ async function loadSettings() {
     const blob = JSON.parse(pm.text.slice(pm.text.indexOf('{')));
     for (const x of Object.values(SETTINGS)) if (typeof blob[x.key] === 'number') CFG[x.key] = blob[x.key];
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
+    if (!(blob.v >= 3)) { CFG.SCAN_EVERY_MIN = 1; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 2)) { for (const x of ['KXBTC15M', 'KXETH15M']) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); setTimeout(saveSettings, 2000); } // add 15-min markets once
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
@@ -81,6 +82,8 @@ function schedule() { if (scanTimer) clearInterval(scanTimer); scanTimer = setIn
 
 const S = { seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
+process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
+process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
 
 // ---------- helpers ----------
 async function req(url, { method = 'GET', headers = {}, body } = {}) {
@@ -156,17 +159,42 @@ async function accountRaw() {
   return { cash, profit, spent, held, tradeCap, dayCap, settledCount: settles.length };
 }
 
+// Kalshi splits cash across exchange shards. Bots must fund the market's shard before ordering.
+async function ensureShardFunds(idx, needed) {
+  const shardCash = b => { const r = {}; for (const x of b.balance_breakdown || []) r[x.exchange_index] = Number(x.balance) || 0; return r; };
+  let cash = shardCash(await kalshi('GET', '/portfolio/balance'));
+  if ((cash[idx] || 0) >= needed) return;
+  const short = Math.round((needed - (cash[idx] || 0) + 0.10) * 100) / 100;
+  const [src, srcCash] = Object.entries(cash).filter(([k]) => Number(k) !== idx).sort((a, b) => b[1] - a[1])[0] || [];
+  if (src === undefined || srcCash < short) throw new Error(`Not enough cash: need ${money(needed)} on shard ${idx}, total available is ${money(Object.values(cash).reduce((a, b) => a + b, 0))}`);
+  await kalshi('POST', '/portfolio/intra_exchange_instance_transfer', {
+    source: 'event_contract', destination: 'event_contract', amount: Math.ceil(short * 10000), // centicents
+    source_exchange_shard: Number(src), destination_exchange_shard: idx, client_transfer_id: crypto.randomUUID(),
+  });
+  log('TRANSFER', money(short), 'shard', src, '->', idx);
+  for (let i = 0; i < 12; i++) { // transfer is async; wait until it lands
+    await new Promise(r => setTimeout(r, 500));
+    cash = shardCash(await kalshi('GET', '/portfolio/balance'));
+    if ((cash[idx] || 0) >= needed) return;
+  }
+  throw new Error('Transfer between Kalshi shards did not arrive in time — try again');
+}
+
 // Kalshi V2 orders: one YES leg. Buy YES = bid at p. Buy NO at p = ask (sell YES) at 1-p.
 async function placeBuy({ ticker, side, count, price }) {
+  const m = (await kalshi('GET', `/markets/${ticker}`)).market || {};
+  const idx = Number.isInteger(m.exchange_index) ? m.exchange_index : 0;
+  await ensureShardFunds(idx, count * price + feeTotal(count, price) + 0.02);
   const yesPrice = side === 'yes' ? price : 1 - price;
   const body = {
     ticker, side: side === 'yes' ? 'bid' : 'ask',
     count: String(count) + '.00', price: yesPrice.toFixed(4),
     time_in_force: 'immediate_or_cancel', self_trade_prevention_type: 'taker_at_cross',
-    client_order_id: 'kbot-' + crypto.randomUUID(),
+    client_order_id: 'kbot-' + crypto.randomUUID(), exchange_index: idx,
   };
   const o = await kalshi('POST', '/portfolio/events/orders', body);
   log('ORDER', JSON.stringify(body), '->', JSON.stringify(o));
+  acctCache = null;
   const filled = num(o.fill_count) || 0;
   const avgYes = num(o.average_fill_price);
   const px = avgYes === avgYes ? (side === 'yes' ? avgYes : 1 - avgYes) : price;
@@ -208,7 +236,7 @@ async function scan(fast) {
     for (const m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
       if (!(mins >= lo && mins <= hi)) continue;
-      if (a.held.has(m.event_ticker) || S.recentAlerts[m.ticker]) continue;
+      if (a.held.has(m.event_ticker) || S.recentAlerts[m.ticker] || (S.recentAlerts['E:' + m.event_ticker] && Date.now() - S.recentAlerts['E:' + m.event_ticker] < 15 * 60e3)) continue;
       if (!cache[product]) cache[product] = await spotVol(product);
       const { spot, sig } = cache[product];
       const fl = num(m.floor_strike), cp = num(m.cap_strike), st = String(m.strike_type);
@@ -234,7 +262,7 @@ async function scan(fast) {
     let count = Math.floor(budget / c.ask);
     while (count > 0 && count * c.ask + feeTotal(count, c.ask) > budget) count--;
     if (count < 1) continue;
-    used.add(c.m.event_ticker); S.recentAlerts[c.m.ticker] = Date.now(); sent++;
+    used.add(c.m.event_ticker); S.recentAlerts[c.m.ticker] = Date.now(); S.recentAlerts['E:' + c.m.event_ticker] = Date.now(); sent++;
     const cost = count * c.ask + feeTotal(count, c.ask);
     const coin = c.product.split('-')[0];
     const st = String(c.m.strike_type);
@@ -251,8 +279,10 @@ async function scan(fast) {
     } else {
       const id = crypto.randomBytes(4).toString('hex');
       S.pending[id] = { ticker: c.m.ticker, side: c.side, price: c.ask, count, created: Date.now() };
+      let okData = `o|${c.m.ticker}|${c.side[0]}|${Math.round(c.ask * 100)}|${count}`, noData = `x|${c.m.ticker}`;
+      if (Buffer.byteLength(okData) > 64) { okData = `ok|${id}`; noData = `no|${id}`; }
       await say(`🔔 TRADE IDEA — tap within ${CFG.ALERT_TTL_MIN} min\n\n` + info, {
-        reply_markup: { inline_keyboard: [[{ text: `✅ Buy ${money(cost)}`, callback_data: `ok|${id}` }, { text: '❌ Skip', callback_data: `no|${id}` }]] },
+        reply_markup: { inline_keyboard: [[{ text: `✅ Buy ${money(cost)}`, callback_data: okData }, { text: '❌ Skip', callback_data: noData }]] },
       });
     }
   }
@@ -389,11 +419,14 @@ async function onUpdate(u) {
       try { await deploy(pr, 'Telegram: ' + pr.summary.slice(0, 120)); return ans('Deploying', '🚀 Approved. Deploying now — I\'ll say 🟢 when the new version is live (about 2 min).'); }
       catch (e) { return ans('Failed', '⚠️ Deploy failed: ' + e.message.slice(0, 200)); }
     }
-    const p = S.pending[id];
+    const parts = String(q.data).split('|');
+    let p = S.pending[id];
+    if (act === 'o' || act === 'x') p = { ticker: parts[1], side: parts[2] === 'y' ? 'yes' : 'no', price: Number(parts[3]) / 100, count: Number(parts[4]), created: (q.message?.date || 0) * 1000 };
     const done = async (toast, line) => { await tg('answerCallbackQuery', { callback_query_id: q.id, text: toast }); await tg('editMessageText', { chat_id: chat, message_id: mid, text: (q.message.text || '') + '\n\n' + line }); };
     if (!p) return done('Expired', '⏹ No longer active.');
     delete S.pending[id];
-    if (act === 'no') return done('Skipped', '❌ Skipped.');
+    if (act === 'no' || act === 'x') return done('Skipped', '❌ Skipped.');
+    await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Placing order…' });
     if (Date.now() - p.created > CFG.ALERT_TTL_MIN * 60e3) return done('Expired', '⌛ Too late — price may have moved.');
     const a = await account(true);
     if (a.spent + p.count * p.price + feeTotal(p.count, p.price) > a.dayCap + 0.001) return done('Daily limit hit', `🛑 Daily limit ${money(a.dayCap)} reached.`);
@@ -461,6 +494,12 @@ http.createServer((rq, rs) => {
     log('SELFCHECK kalshi FAILED', e.message);
     if (/INCORRECT_API_KEY_SIGNATURE/.test(e.message) && env.KEY_REPAIR === '1') await repairKey();
   }
+  if (env.TRANSFER_SELFTEST === '1') { // moves 1¢ between your own shards to prove the key may transfer
+    try {
+      const r = await kalshi('POST', '/portfolio/intra_exchange_instance_transfer', { source: 'event_contract', destination: 'event_contract', amount: 100, source_exchange_shard: 0, destination_exchange_shard: 2, client_transfer_id: crypto.randomUUID() });
+      log('TRANSFERTEST OK', JSON.stringify(r));
+    } catch (e) { log('TRANSFERTEST FAILED', e.message); }
+  }
   if (env.ORDER_SELFTEST === '1') { // $0 test: 1-contract YES bid at 1¢, immediate-or-cancel, cannot fill at a fair price
     try {
       const ms = await kalshi('GET', '/markets?series_ticker=KXBTC15M&status=open&limit=5');
@@ -497,11 +536,14 @@ async function repairKey() {
 
 async function tick(fast = false) {
   if (S.busy) return; S.busy = true;
-  try { await scan(fast); if (!fast) await scan(true); S.lastScan = new Date().toISOString(); S.lastError = null; }
-  catch (e) { S.lastError = e.message.slice(0, 200); log('scan error', e.message); }
+  try { await scan(fast); if (!fast) await scan(true); S.lastScan = new Date().toISOString(); S.lastError = null; S.errCount = 0; }
+  catch (e) {
+    S.lastError = e.message.slice(0, 200); S.errCount = (S.errCount || 0) + 1; log('scan error', e.message);
+    if (S.errCount >= 3 && Date.now() - (S.lastErrAlert || 0) > 30 * 60e3) { S.lastErrAlert = Date.now(); say('⚠️ Scanning keeps failing: ' + S.lastError); }
+  }
   finally { S.busy = false; }
 }
-setInterval(() => tick(true), 60e3); // 15-min markets checked every minute
+setInterval(() => tick(true), 30e3); // 15-min markets checked every 30 seconds
 setTimeout(tick, 15000);
 // keep the free Render instance awake
 if (PUBLIC_URL) setInterval(() => fetch(PUBLIC_URL + '/').catch(() => {}), 4 * 60e3);
