@@ -210,13 +210,82 @@ async function placeBuy({ ticker, side, count, price }) {
 function normCdf(x) { const t = 1 / (1 + 0.2316419 * Math.abs(x)); const k = 0.3989422804014327 * Math.exp(-x * x / 2); const p = k * t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429)))); return x > 0 ? 1 - p : p; }
 function probAbove(Sp, K, sig, T) { if (!(K > 0)) return NaN; const s = sig * Math.sqrt(Math.max(T, 0.5)); return normCdf((Math.log(Sp / K) - 0.5 * s * s) / s); }
 const sd = a => { const m = a.reduce((x, y) => x + y, 0) / a.length; return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / (a.length - 1)); };
-async function spotVol(product) {
+// Live read of BTC and ETH before every trade: price, momentum, volatility regime, data freshness.
+async function coinState(product) {
   const H = { 'User-Agent': 'kalshi-bot' };
-  const t = await req(`https://api.exchange.coinbase.com/products/${product}/ticker`, { headers: H });
-  const c = await req(`https://api.exchange.coinbase.com/products/${product}/candles?granularity=60`, { headers: H });
+  const [t, c] = await Promise.all([
+    req(`https://api.exchange.coinbase.com/products/${product}/ticker`, { headers: H }),
+    req(`https://api.exchange.coinbase.com/products/${product}/candles?granularity=60`, { headers: H }),
+  ]);
   const closes = c.map(x => x[4]).reverse(), r = [];
   for (let i = 1; i < closes.length; i++) r.push(Math.log(closes[i] / closes[i - 1]));
-  return { spot: Number(t.price), sig: Math.max(sd(r.slice(-60)), sd(r.slice(-300))) * CFG.VOL_MULT };
+  const spot = Number(t.price), last = closes[closes.length - 1];
+  const sig1h = sd(r.slice(-60)), sig5h = sd(r.slice(-300)), sig15 = sd(r.slice(-15));
+  const sig = Math.max(sig1h, sig5h) * CFG.VOL_MULT;
+  const ret = n => Math.log(spot / closes[closes.length - 1 - n]);
+  const st = {
+    product, spot, sig, sig15, sig5h,
+    r5: ret(5), r15: ret(15),
+    z5: ret(5) / (sig * Math.sqrt(5)), z15: ret(15) / (sig * Math.sqrt(15)),
+    ageSec: Math.round(Date.now() / 1000 - c[0][0]),
+    feedGap: Math.abs(Math.log(spot / last)) / sig, // ticker vs latest candle sanity
+  };
+  st.problems = [];
+  if (!(spot > 0) || r.length < 100) st.problems.push('price data missing');
+  if (st.ageSec > 180) st.problems.push(`price data ${st.ageSec}s old`);
+  if (Math.abs(st.z5) > 3) st.problems.push(`sudden ${st.r5 > 0 ? 'spike' : 'drop'} ${(st.r5 * 100).toFixed(2)}% in 5 min`);
+  if (sig15 > 2.5 * sig5h) st.problems.push('volatility spiking');
+  if (st.feedGap > 4) st.problems.push('price feed mismatch');
+  return st;
+}
+async function marketConditions() {
+  const [btc, eth] = await Promise.all([coinState('BTC-USD'), coinState('ETH-USD')]);
+  const out = { 'BTC-USD': btc, 'ETH-USD': eth };
+  // crypto moves together: a shock in either coin blocks both
+  for (const [k, o] of [['BTC-USD', eth], ['ETH-USD', btc]]) {
+    const shock = o.problems.filter(x => /sudden|spiking/.test(x));
+    if (shock.length) out[k].problems.push(`${o.product.split('-')[0]} ${shock[0]}`);
+  }
+  return out;
+}
+const pct = x => (x >= 0 ? '+' : '') + (x * 100).toFixed(2) + '%';
+function condLine(st, other) {
+  const regime = st.sig15 > 1.5 * st.sig5h ? 'choppy' : st.sig15 < 0.6 * st.sig5h ? 'quiet' : 'normal';
+  return `${st.product.split('-')[0]} 5m ${pct(st.r5)} · 15m ${pct(st.r15)} · vol ${regime} · ${other.product.split('-')[0]} ${other.problems.length ? '⚠️' : 'calm'} · data ${st.ageSec}s old`;
+}
+
+// Full analysis of one Kalshi market given live conditions. Returns per-side verdicts.
+function evaluate(m, st, now = Date.now()) {
+  const mins = (new Date(m.close_time).getTime() - now) / 60000;
+  const { spot, sig } = st;
+  const fl = num(m.floor_strike), cp = num(m.cap_strike), sty = String(m.strike_type);
+  let pY;
+  if (sty.startsWith('greater')) pY = probAbove(spot, fl, sig, mins);
+  else if (sty.startsWith('less')) pY = 1 - probAbove(spot, cp, sig, mins);
+  else if (sty === 'between') pY = probAbove(spot, fl, sig, mins) - probAbove(spot, cp, sig, mins);
+  else return [];
+  if (!(pY >= 0 && pY <= 1)) return [];
+  const yAsk = d(m, 'yes_ask'), nAsk = d(m, 'no_ask');
+  let yBid = d(m, 'yes_bid'); if (!(yBid > 0)) yBid = nAsk > 0 ? 1 - nAsk : yAsk;
+  const mid = (yAsk + yBid) / 2, spread = yAsk - yBid;
+  if (!(mid > 0 && mid < 1)) return [];
+  const W = CFG.MODEL_WEIGHT, out = [];
+  for (const s of [{ side: 'yes', raw: pY, mkt: mid, ask: yAsk }, { side: 'no', raw: 1 - pY, mkt: 1 - mid, ask: nAsk }]) {
+    s.mins = mins; s.spread = spread; s.spot = spot; s.sig = sig;
+    s.p = W * s.raw + (1 - W) * s.mkt;
+    s.edge = s.p - s.ask - (0.07 * s.ask * (1 - s.ask) + 0.005);
+    // which way does this bet need the price to move?
+    const up = sty.startsWith('greater') ? s.side === 'yes' : sty.startsWith('less') ? s.side === 'no' : null;
+    s.reasons = [...st.problems];
+    if (!(s.ask >= CFG.MIN_PRICE && s.ask <= CFG.MAX_PRICE)) s.reasons.push(`price ${cents(s.ask)} outside ${cents(CFG.MIN_PRICE)}–${cents(CFG.MAX_PRICE)}`);
+    if (spread > 0.06) s.reasons.push(`thin market (spread ${cents(spread)})`);
+    if (up !== null && Math.abs(st.z15) > 2 && (st.z15 > 0) !== up) s.reasons.push(`strong ${st.z15 > 0 ? 'up' : 'down'}trend against this bet`);
+    if (s.edge < CFG.MIN_EDGE) s.reasons.push(`edge ${(s.edge * 100).toFixed(1)}¢ below ${(CFG.MIN_EDGE * 100).toFixed(0)}¢`);
+    if (s.edge > CFG.MAX_EDGE) s.reasons.push('edge too big to trust (bad data?)');
+    s.ok = s.reasons.length === 0;
+    out.push(s);
+  }
+  return out;
 }
 
 // ---------- scan ----------
@@ -231,36 +300,18 @@ async function scan(fast) {
   let remaining = a.dayCap - a.spent;
   if (remaining < 0.5) return;
 
-  const cache = {}, cands = [];
+  const cond = await marketConditions(), cands = [];
   for (const series of CFG.SERIES.filter(x => isFast(x) === !!fast)) {
-    const product = CFG.SPOT[series]; if (!product) continue;
+    const product = CFG.SPOT[series]; if (!product || !cond[product]) continue;
     const lo = isFast(series) ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES, hi = isFast(series) ? CFG.FAST_MAX_MINUTES : CFG.MAX_MINUTES;
     const markets = await pageAll(`/markets?series_ticker=${series}&status=open`, 'markets');
-    if (!S.seen[series]) { S.seen[series] = 1; const m0 = markets[0] || {}; log('SERIES', series, 'open markets:', markets.length, 'sample:', JSON.stringify({ t: m0.ticker, close: m0.close_time, st: m0.strike_type, fl: m0.floor_strike, cap: m0.cap_strike, ya: m0.yes_ask_dollars, na: m0.no_ask_dollars, sub: m0.yes_sub_title })); }
+    if (!S.seen[series]) { S.seen[series] = 1; log('SERIES', series, 'open markets:', markets.length); }
+    if (cond[product].problems.length) { if (!S.condWarn || Date.now() - S.condWarn > 15 * 60e3) { S.condWarn = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; ')); } continue; }
     for (const m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
       if (!(mins >= lo && mins <= hi)) continue;
       if (a.held.has(m.event_ticker) || S.sc.ev[m.event_ticker]) continue; // ONE alert per market window, ever — next one only when a new window opens
-      if (!cache[product]) cache[product] = await spotVol(product);
-      const { spot, sig } = cache[product];
-      const fl = num(m.floor_strike), cp = num(m.cap_strike), st = String(m.strike_type);
-      let pY;
-      if (st.startsWith('greater')) pY = probAbove(spot, fl, sig, mins);
-      else if (st.startsWith('less')) pY = 1 - probAbove(spot, cp, sig, mins);
-      else if (st === 'between') pY = probAbove(spot, fl, sig, mins) - probAbove(spot, cp, sig, mins);
-      else continue;
-      if (!(pY >= 0 && pY <= 1)) continue;
-      const yAsk = d(m, 'yes_ask'), nAsk = d(m, 'no_ask');
-      let yBid = d(m, 'yes_bid'); if (!(yBid > 0)) yBid = nAsk > 0 ? 1 - nAsk : yAsk;
-      const mid = (yAsk + yBid) / 2; // market's own YES probability
-      if (!(mid > 0 && mid < 1)) continue;
-      const W = CFG.MODEL_WEIGHT;
-      for (const s of [{ side: 'yes', raw: pY, mkt: mid, ask: yAsk }, { side: 'no', raw: 1 - pY, mkt: 1 - mid, ask: nAsk }]) {
-        if (!(s.ask >= CFG.MIN_PRICE && s.ask <= CFG.MAX_PRICE)) continue;
-        s.p = W * s.raw + (1 - W) * s.mkt;
-        const edge = s.p - s.ask - (0.07 * s.ask * (1 - s.ask) + 0.005);
-        if (edge >= CFG.MIN_EDGE && edge <= CFG.MAX_EDGE) cands.push({ m, product, spot, sig, mins, ...s, edge });
-      }
+      for (const v of evaluate(m, cond[product], now)) if (v.ok) cands.push({ m, product, ...v, cond: condLine(cond[product], cond[product === 'BTC-USD' ? 'ETH-USD' : 'BTC-USD']) });
     }
   }
   for (const [k, v] of Object.entries(S.sc.ev)) if (v < Date.now() - 60e3) delete S.sc.ev[k];
@@ -284,7 +335,7 @@ async function scan(fast) {
       `👉 BUY ${c.side.toUpperCase()}: ${count} @ ${cents(c.ask)} = ${money(cost)}\n` +
       `Win: +${money(count - cost)} · Lose: −${money(cost)}\n` +
       `Win chance: bot ${(c.p * 100).toFixed(0)}% (model ${(c.raw * 100).toFixed(0)}%, market ${(c.mkt * 100).toFixed(0)}%) vs price ${(c.ask * 100).toFixed(0)}¢ → edge ${(c.edge * 100).toFixed(1)}¢\n` +
-      `${coin} now ${money(c.spot)} · Today ${money(a.spent)}/${money(a.dayCap)} · Profit ${money(a.profit)}`;
+      `${coin} now ${money(c.spot)} · Today ${money(a.spent)}/${money(a.dayCap)} · Profit ${money(a.profit)}\n📊 ${c.cond}`;
     if (S.unlocked) {
       const r = await placeBuy({ ticker: c.m.ticker, side: c.side, count, price: c.ask });
       remaining -= r.total; acctCache = null; await saveSettings().catch(() => {});
@@ -447,6 +498,15 @@ async function onUpdate(u) {
     const m = (await kalshi('GET', `/markets/${p.ticker}`)).market || {};
     const ask = d(m, p.side + '_ask');
     if (!(ask > 0) || ask > p.price + CFG.MAX_SLIPPAGE) return done('Price moved', `⚠️ Price moved to ${cents(ask)}. Not bought.`);
+    // re-analyze BTC + ETH and this market right now, with live data
+    const series = p.ticker.split('-')[0], product = CFG.SPOT[series];
+    const cond = await marketConditions();
+    const v = evaluate(m, cond[product]).find(x => x.side === p.side);
+    const relaxed = v ? v.reasons.filter(r => !/^edge .* below/.test(r)) : ['market data unavailable'];
+    if (!v || relaxed.length || v.edge < CFG.MIN_EDGE / 2) {
+      const why = v ? (relaxed.length ? relaxed : v.reasons).join('; ') : 'market data unavailable';
+      return done('Not bought — conditions changed', `🛑 Live re-check failed: ${why}. Not bought.`);
+    }
     // never spend more than the per-trade cap, even if the price ticks up before the fill
     const limit = Math.min(p.price + CFG.MAX_SLIPPAGE, 0.99);
     let count = p.count;
