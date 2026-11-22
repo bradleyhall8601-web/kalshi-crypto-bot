@@ -248,12 +248,13 @@ async function pageAll(path, key) {
 let acctCache = null;
 async function account(fresh = false) {
   // history (settlements, fills, positions) is cached briefly; the wallet balance is ALWAYS fetched fresh
-  if (!fresh && acctCache && Date.now() - acctCache.t < 20000) {
+  const cached = acctCache; // the 15-min and hourly scans run side by side: keep our own reference across the await
+  if (!fresh && cached && Date.now() - cached.t < 20000) {
     const b = await kalshi('GET', '/portfolio/balance');
     const shards = {}; for (const x of b.balance_breakdown || []) shards[x.exchange_index] = Number(x.balance) || 0;
     const cash = d(b, 'balance');
     const tradeCap = S.unlocked ? Math.max(CFG.SMALL_TRADE, cash * CFG.SCALED_TRADE_PCT) : Math.min(CFG.SMALL_TRADE, Math.max(0.5, cash * CFG.TRADE_PCT));
-    return { ...acctCache.v, cash, shards, tradeCap };
+    return { ...cached.v, cash, shards, tradeCap };
   }
   const v = await accountRaw(); acctCache = { t: Date.now(), v }; return v;
 }
