@@ -61,6 +61,8 @@ const CFG = {
   MAKER_EDGE: 0.02,  // a resting bid needs this much calibrated edge after the maker fee
   MAKER_TTL_MIN: 5,  // re-check / re-post a resting bid at least this often
   KELLY: env.BOT_TEST === '1' ? 0 : 0.5,
+  PAPER: 0,          // paper trading: score every trade the bot would make, spend nothing, until the record proves a profit
+  PAPER_PROVE_N: 50, PAPER_PROVE_EDGE: 0.02, // go live after 50+ paper trades averaging +2¢ per contract after fees
   MAX_SAME_DIR: env.BOT_TEST === '1' ? 50 : 2, // coins move together: at most 2 bets on the same direction (up/down) per closing time
   RESERVE_SCALE: env.BOT_TEST === '1' ? 0 : 1, // reserve = the smaller of $RESERVE and 10% of the account (min 25¢), so a small account can still trade // size by half-Kelly on the calibrated edge (capped by tradepct)            // self-calibration: shrink the model toward the market by how much its past disagreements came true          // self-learning: each market type (coin x 15-min/hourly/daily) tightens or benches itself from its own real results
   MAX_ALERTS_PER_RUN: 2, ALERT_TTL_MIN: 4, MAX_SLIPPAGE: 0.02,
@@ -101,6 +103,7 @@ const SETTINGS = {
   maxopen:  { key: 'MAX_OPEN_PCT', desc: 'max share of money in open positions (0.6 = 60%)', min: 0.1, max: 1 },
   maker:    { key: 'MAKER', desc: 'limit bids instead of paying the ask (1 = on, 0 = off)', min: 0, max: 1 },
   makeredge:{ key: 'MAKER_EDGE', desc: 'edge needed for a limit bid (0.02 = 2¢)', min: 0, max: 0.2 },
+  paper:    { key: 'PAPER', desc: 'paper trading (1 = practice only, no real money; 0 = real)', min: 0, max: 1 },
   samedir:  { key: 'MAX_SAME_DIR', desc: 'max bets on the same direction (up/down) closing at the same time, across coins', min: 1, max: 50 },
   reservescale: { key: 'RESERVE_SCALE', desc: 'reserve shrinks with a small account (1 = on: min of $reserve and 10%)', min: 0, max: 1 },
   kelly:    { key: 'KELLY', desc: 'bet size as a share of the Kelly amount (0.5 = half; 0 = off)', min: 0, max: 1 },
@@ -118,7 +121,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 10; blob.REST = S.rest; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 11; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -139,6 +142,8 @@ async function loadSettings() {
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
     if (!(blob.v >= 10) && env.BOT_TEST !== '1') { CFG.TRADE_PCT = 0.06; CFG.DAILY_MIN_EQUITY = 50; CFG.MAKER = 1; CFG.KELLY = 0.5; setTimeout(saveSettings, 2000); } // grow-and-last sizing + limit bids
     if (blob.REST && typeof blob.REST === 'object') S.rest = blob.REST;
+    if (blob.PAPERS && typeof blob.PAPERS === 'object') S.paper = { r: blob.PAPERS.r || [], pos: blob.PAPERS.pos || [], bids: blob.PAPERS.bids || {}, since: blob.PAPERS.since || Date.now() };
+    if (!(blob.v >= 11) && env.BOT_TEST !== '1') { CFG.PAPER = 1; S.paper.since = Date.now(); setTimeout(() => { saveSettings(); say('📄 PAPER TRADING ON — no real money is spent from now on. The bot keeps scanning every market and grades every trade it would have made against Kalshi\'s real results. It switches back to real money by itself after 50+ paper trades averaging +2¢ or better per contract. /paper shows the record.'); }, 3000); }
     if (!(blob.v >= 9)) { for (const x of Object.values(HOURLY_ALT)) if (!CFG.SERIES.includes(x) && CFG.SERIES.some(y => coinOf(y) === coinOf(x))) CFG.SERIES.push(x); setTimeout(saveSettings, 2000); } // NEAR/ZEC hourly live under KX..H
     if (!(blob.v >= 8)) { for (const x of ALL_SERIES) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); CFG.FAST_STREAK = Math.max(CFG.FAST_STREAK || 0, 8); CFG.DAILY = 1; CFG.MAX_OPEN_PCT = 0.6; CFG.LEARN = 1; setTimeout(saveSettings, 2000); } // all coins + daily + self-learning
     if (!(blob.v >= 7)) { CFG.ALWAYS_IN = 1; CFG.ALWAYS_EDGE = 0; CFG.ALWAYS_PCT = 0.10; setTimeout(saveSettings, 2000); }
@@ -188,7 +193,7 @@ async function rollDay(today) {
   S.led = { ...newLed(today), auto: S.led.auto || [] };
 }
 const S = { bootAt: Date.now(), win: {}, // per market window: best verdict seen, traded or not
-   learn: {}, lanes: {}, rest: {}, newsSeen: new Set(), newsLog: [], newsPauseUntil: 0, newsPauseWhy: '', lastCond: {}, stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+   learn: {}, lanes: {}, rest: {}, paper: { r: [], pos: [], bids: {}, since: Date.now() }, newsSeen: new Set(), newsLog: [], newsPauseUntil: 0, newsPauseWhy: '', lastCond: {}, stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
@@ -593,6 +598,8 @@ function eventPause() {
   return null;
 }
 function recapReason(w) {
+  if (w.traded && w.traded.paper) return `📄 paper ${w.traded.side.toUpperCase()} @ ${cents(w.traded.px)}`;
+  if (w.bid && w.bid.paper) return `📄 paper bid ${w.bid.side.toUpperCase()} @ ${cents(w.bid.q)} — not filled`;
   if (w.traded && w.traded !== true) return `✅ bought ${w.traded.n} ${w.traded.side.toUpperCase()} @ ${cents(w.traded.px)}`;
   if (w.traded === true) return '✅ traded';
   if (w.blocked && !w.best) return `⏸ paused — ${w.blocked}`;
@@ -648,7 +655,10 @@ function stakeFor(p, q, equity) {
 function sameDirCount(close, side) {
   const r = Object.values(S.rest || {}).filter(o => Math.abs(o.close - close) < 1500 && o.side === side).length;
   const f = (S.led.auto || []).filter(x => !x.done && Math.abs(x.c - close) < 1500 && x.s === side[0] && !(x.oid && S.rest[x.oid])).length;
-  return r + f;
+  if (CFG.PAPER !== 1) return r + f;
+  const pb = Object.values(S.paper.bids || {}).filter(b => Math.abs(b.close - close) < 1500 && b.side === side).length;
+  const pp = (S.paper.pos || []).filter(o => Math.abs(o.c - close) < 1500 && o.side === side).length;
+  return pb + pp;
 }
 const restingCost = () => Object.values(S.rest || {}).reduce((a, o) => a + Math.max(0, o.n - (o.filled || 0)) * (o.q + makerFee(o.q)), 0);
 const restingFor = ev => Object.values(S.rest || {}).find(o => o.ev === ev);
@@ -720,6 +730,50 @@ async function manageBids(latest, fast) {
       if (env.BOT_DEBUG_BIDS === '1') log('BIDCHK', o.id, why, v ? JSON.stringify({ p: v.p, ask: v.ask, sp: v.spread, r: v.reasons }) : 'no v');
       if (why) await cancelBid(o, why);
     } catch (e) { log('manage bid failed', o.id, e.message); }
+  }
+}
+// ---------- paper trading ----------
+// Same decisions as real trading, no money. Taker picks fill at the ask (+taker fee). Limit bids fill only when
+// the market later offers at or below our bid — i.e. only when a real resting bid would have been hit,
+// including the bad fills when price moves against us. Graded against Kalshi's real settlement.
+const paperRec = () => { const r = S.paper.r || [], n = r.length, sum = r.reduce((a, x) => a + x, 0), w = r.filter(x => x > 0).length; return { n, sum, w, avg: n ? sum / n : 0 }; };
+const paperText = () => { const { n, sum, w, avg } = paperRec(), open = (S.paper.pos || []).length, bids = Object.keys(S.paper.bids || {}).length;
+  return `📄 PAPER ${CFG.PAPER === 1 ? 'TRADING ON (no real money)' : 'record'}\n🧾 ${n} graded · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢ per contract)\n⏳ ${open} open · ${bids} bids waiting\n🎯 Goes live after ${CFG.PAPER_PROVE_N}+ trades averaging +${Math.round(CFG.PAPER_PROVE_EDGE * 100)}¢ or better${n ? ` — now ${Math.max(0, CFG.PAPER_PROVE_N - n)} to go` : ''}`; };
+function paperOpen(o) { S.paper.pos = (S.paper.pos || []).concat([o]).slice(-60); if (S.win[o.ev]) S.win[o.ev].traded = { side: o.side, px: o.px, n: 1, paper: true }; }
+async function paperGrade() {
+  const due = (S.paper.pos || []).filter(o => Date.now() > o.c + 3 * 60e3); if (!due.length) return;
+  const lines = [];
+  for (const o of due) {
+    let m; try { m = (await kalshi('GET', `/markets/${o.t}`)).market || {}; } catch (e) { continue; }
+    const res = String(m.result || '').toLowerCase();
+    if (res !== 'yes' && res !== 'no') { if (Date.now() > o.c + 6 * 3600e3) S.paper.pos = S.paper.pos.filter(x => x !== o); continue; }
+    const win = res === o.side ? 1 : 0, fee = o.kind === 'take' ? 0.07 * o.px * (1 - o.px) : 0;
+    const pnl = Math.round((win - o.px - fee) * 100) / 100;
+    S.paper.r = (S.paper.r || []).concat([pnl]).slice(-200); S.paper.pos = S.paper.pos.filter(x => x !== o);
+    if (o.pb >= 0 && o.mk >= 0) { S.sc.hist = (S.sc.hist || []).concat([[o.pb, o.mk, win]]).slice(-200); calDirty = true; }
+    await learnLane(laneOf(o.ev, new Date(o.c).toISOString()), pnl, o.px);
+    lines.push(`${win ? '✅' : '❌'} ${label(o.t).replace(/ ≥ \$[\d,.]+/, '')} ${o.side.toUpperCase()} @ ${cents(o.px)} ${pnl >= 0 ? '+' : '−'}${money(Math.abs(pnl))}${o.kind === 'bid' ? ' (bid)' : ''}`);
+  }
+  if (!lines.length) return;
+  const { n, sum, avg } = paperRec();
+  await say(`📄 PAPER RESULTS\n${lines.join('\n')}\n📊 Record: ${n} trades ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract)`);
+  if (CFG.PAPER === 1 && n >= CFG.PAPER_PROVE_N && avg >= CFG.PAPER_PROVE_EDGE) {
+    CFG.PAPER = 0; await say(`✅ PAPER RECORD PROVEN: ${n} trades averaging +${(avg * 100).toFixed(1)}¢ per contract. Real trading is back ON (smallest sizes first). /set paper 1 to go back to practice.`);
+  }
+  await saveSettings().catch(() => {});
+}
+function managePaperBids(latest, fast) {
+  for (const [ev, b] of Object.entries(S.paper.bids || {})) {
+    if (isFast(ev.split('-')[0]) !== !!fast) continue;
+    const v = latest[b.t + '|' + b.side], now = Date.now();
+    if (v && v.ask <= b.q + 1e-9) { delete S.paper.bids[ev]; paperOpen({ t: b.t, ev, side: b.side, px: b.q, c: b.close, p: b.p, pb: b.pb, mk: b.mk, kind: 'bid' }); continue; } // a seller came down to our price
+    let why = null;
+    if (now >= b.stop) why = 'window closing';
+    else if (!v) { if (now - b.placed > 30e3) why = 'market not seen'; }
+    else if (v.reasons.some(r => !/^edge .* below/.test(r) && !/^price .* outside/.test(r))) why = 'conditions';
+    else if (v.p - b.q - makerFee(b.q) < CFG.MAKER_EDGE / 2) why = 'edge gone';
+    else { const mq = makerQuote(v); if (mq && mq.q > b.q && now - b.placed > 20e3) { b.q = mq.q; b.placed = now; } }
+    if (why) { delete S.paper.bids[ev]; if (S.win[ev] && !S.win[ev].traded) S.win[ev].bid = { side: b.side, q: b.q, n: 1, why, paper: true }; }
   }
 }
 async function scan(fast) {
@@ -841,12 +895,13 @@ async function scan(fast) {
     const fastLeft = autoFast && !S.unlocked && CFG.FAST_DAY > 0 ? CFG.FAST_DAY - (S.led.fast || 0) : Infinity;
     const oc = (a.exposure !== null && a.exposure !== undefined ? a.exposure : openCost()) + restingCost(), room = CFG.MAX_OPEN_PCT * (a.cash + oc) - oc; // never tie up more than MAX_OPEN_PCT of the money at once
     const W1 = S.win[c.m.event_ticker], skip = why => { if (W1 && !W1.traded) W1.skip = why; };
-    if (auto && room < 0.15 && a.cash - resv(a) >= 0.5) { skip(`🔒 ${money(oc)} already in open bets (max ${Math.round(CFG.MAX_OPEN_PCT * 100)}% of money)`); if (Date.now() - (S.roomWarned || 0) > 60 * 60e3) { S.roomWarned = Date.now(); log('exposure cap', money(oc), 'open'); } continue; }
+    if (auto && CFG.PAPER !== 1 && room < 0.15 && a.cash - resv(a) >= 0.5) { skip(`🔒 ${money(oc)} already in open bets (max ${Math.round(CFG.MAX_OPEN_PCT * 100)}% of money)`); if (Date.now() - (S.roomWarned || 0) > 60 * 60e3) { S.roomWarned = Date.now(); log('exposure cap', money(oc), 'open'); } continue; }
     const budget = Math.min(a.tradeCap, remaining, a.cash - restingCost() - Math.max(resv(a), 0.02), fastLeft, auto ? Math.max(room, 0) : Infinity, c.always ? Math.max(0.5, a.cash * CFG.ALWAYS_PCT) : Infinity,
       auto && CFG.KELLY > 0 ? stakeFor(c.p, worst, a.cash + oc) : Infinity);
     let count = Math.floor(budget / worst);
     while (count > 0 && count * worst + feeTotal(count, worst) > budget) count--;
     if (S.led.safe && count > 1) count = 1; // safe mode after a losing day: smallest possible bets
+    if (auto && CFG.PAPER === 1) count = 1; // paper: one contract, no wallet limits
     if (count < 1) skip(`💸 not enough free cash for 1 at ${cents(worst)} (${money(Math.max(0, budget))} usable: wallet ${money(a.cash)}, ${money(resv(a))} kept safe, ${money(oc)} in open bets)`);
     if (auto && count >= 1) { const depth = bookDepth(c.m, c.side, worst); if (depth < count) count = Math.floor(depth); if (count < 1 && c.m._book) { skip(`📉 nobody selling at ≤${cents(worst)}`); S.nlq = S.nlq || {}; if (!S.nlq[c.m.ticker]) { S.nlq[c.m.ticker] = 1; log('no liquidity', c.m.ticker, c.side, worst); } continue; } }
     if (env.BOT_DEBUG === '1') log('SIZE', c.m.ticker, JSON.stringify({ cap: a.tradeCap, remaining, cash: a.cash, worst, count }));
@@ -862,6 +917,11 @@ async function scan(fast) {
       `Win: +${money(count - cost)} · Lose: −${money(cost)}\n` +
       `Win chance: bot ${(c.p * 100).toFixed(0)}% (model ${(c.raw * 100).toFixed(0)}%, market ${(c.mkt * 100).toFixed(0)}%) vs price ${(c.ask * 100).toFixed(0)}¢ → edge ${(c.edge * 100).toFixed(1)}¢\n` +
       `💰 Wallet ${money(a.cash)} → ${money(a.cash - cost)} after · Today ${money(a.spent)}/${money(a.dayCap)} · Profit ${money(a.profit)}\n📊 ${c.cond} · ${coin} ${money(c.spot)}`;
+    if (auto && CFG.PAPER === 1) { // practice: record the trade at the price we'd really pay, spend nothing
+      paperOpen({ t: c.m.ticker, ev: c.m.event_ticker, side: c.side, px: Math.min(limit || c.ask, c.ask), c: Date.parse(c.m.close_time), p: c.p, pb: Math.round((c.pb ?? c.p) * 1000), mk: Math.round((c.mkt ?? c.ask) * 1000), kind: 'take' });
+      S.sc.open = S.sc.open.filter(o => o.t !== c.m.ticker); // graded by the paper book instead
+      continue;
+    }
     if (auto) {
       const unmark = () => { delete S.sc.ev[c.m.event_ticker]; S.sc.open = S.sc.open.filter(o => o.t !== c.m.ticker); }; // nothing bought: window stays open for a later try
       try {
@@ -907,7 +967,18 @@ async function scan(fast) {
       });
     }
   }
-  if (CFG.MAKER === 1) {
+  if (CFG.MAKER === 1 && CFG.PAPER === 1) {
+    for (const o of Object.values(S.rest || {}).filter(x => isFast(x.ev.split('-')[0]) === !!fast)) await cancelBid(o, 'paper mode').catch(() => {});
+    managePaperBids(latest, fast);
+    const autoOn = fast ? CFG.AUTO_FAST === 1 : CFG.AUTO_HOURLY === 1;
+    if (autoOn && !S.led.fastOff) for (const [ev, w] of Object.entries(S.win).filter(([e, w]) => w.mk && isFast(w.series) === !!fast && !w.traded && freshWin.has(e)).sort((x, y) => y[1].mk.edge - x[1].mk.edge)) {
+      if (S.paper.bids[ev] || used.has(ev) || (S.paper.pos || []).some(o => o.ev === ev)) continue;
+      const lk = laneOf(ev, w.mk.m.close_time); if (laneBenched(lk) || w.mk.edge < CFG.MAKER_EDGE + laneBar(lk)) continue;
+      if (sameDirCount(Date.parse(w.mk.m.close_time), w.mk.v.side) >= CFG.MAX_SAME_DIR) { w.skip = `🔗 already ${CFG.MAX_SAME_DIR} ${w.mk.v.side === 'yes' ? 'UP' : 'DOWN'} bets closing then (coins move together)`; continue; }
+      const { q, v, m } = w.mk, close = Date.parse(m.close_time);
+      S.paper.bids[ev] = { t: m.ticker, side: v.side, q, p: Math.round(v.p * 1000) / 1000, pb: Math.round((v.pb ?? v.p) * 1000), mk: Math.round(v.mkt * 1000), placed: Date.now(), close, stop: close - (fast ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES) * 60e3 };
+    }
+  } else if (CFG.MAKER === 1) {
     await manageBids(latest, fast);
     const autoOn = fast ? CFG.AUTO_FAST === 1 : CFG.AUTO_HOURLY === 1;
     if (autoOn && !S.paused && !S.led.fastOff) {
@@ -1160,9 +1231,10 @@ async function onUpdate(u) {
   }
   if (t.startsWith('/coins')) return coverageReport();
   if (t.startsWith('/learn')) return say(calText() + '\n\n' + lanesText());
+  if (t.startsWith('/paper')) return say(paperText());
   if (t.startsWith('/bids')) { const r = Object.values(S.rest || {}); return say(r.length ? `📋 Resting limit bids (${money(restingCost())} reserved):\n` + r.map(o => `• ${label(o.t)} ${o.side.toUpperCase()} ${o.n} @ ${cents(o.q)} · win chance ${Math.round(o.p * 100)}%${o.filled ? ` · ${o.filled} filled` : ''}`).join('\n') : `📋 No resting bids right now. Limit bids: ${CFG.MAKER === 1 ? 'ON' : 'OFF (/set maker 1)'}`); }
   if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins all  (or btc,eth,sol,…)');
-  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/news – market-moving headlines + pauses\n/research – what the self-test learned\n/coins – which coins & markets are live\n/learn – self-learning results per market\n/bids – resting limit bids\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol,xrp,doge,bnb,hype,near,zec (or all)');
+  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/news – market-moving headlines + pauses\n/research – what the self-test learned\n/coins – which coins & markets are live\n/learn – self-learning results per market\n/bids – resting limit bids\n/paper – practice-trading record\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol,xrp,doge,bnb,hype,near,zec (or all)');
   if (t.startsWith('/set')) { const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
   if (t.startsWith('/rollback')) return rollback();
   if (t.startsWith('/claude') || !t.startsWith('/')) {
@@ -1172,7 +1244,7 @@ async function onUpdate(u) {
   }
   try {
     const a = await account();
-    return say(`📊 Status\nMode: ${S.paused ? 'PAUSED' : S.unlocked ? 'AUTO' : 'CONFIRM (you tap to buy)'}\nAuto 15-min: ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : S.led.safe ? 'ON · 🛡 SAFE MODE today (1 contract, 5¢+ edges)' : 'ON'} · today ${money(S.led.fast || 0)}/${CFG.FAST_DAY > 0 ? money(CFG.FAST_DAY) : 'no limit'} · result ${(S.led.autoPnl || 0) >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\nAuto hourly: ${CFG.AUTO_HOURLY !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : S.led.safe ? 'ON · 🛡 SAFE MODE' : 'ON'} · always-in ${CFG.ALWAYS_IN === 1 ? 'ON' : 'OFF'} · 🛡 reserve ${money(resv(a))} · max ${Math.round(CFG.TRADE_PCT * 100)}% of wallet/trade\nCash: ${money(a.cash)} · 📋 limit bids ${CFG.MAKER === 1 ? `ON (${Object.keys(S.rest || {}).length} resting)` : 'OFF'} · sizing ${CFG.KELLY > 0 ? `½-Kelly, max ${Math.round(CFG.TRADE_PCT * 100)}%/trade` : 'fixed'}\nProfit since start: ${money(a.profit)} (auto at ${money(CFG.UNLOCK_PROFIT)})\nToday: ${money(a.spent)} of ${money(a.dayCap)} · max ${money(a.tradeCap)}/trade\nLast scan: ${S.lastScan ? timeCT(S.lastScan) : 'not yet'}${S.lastError ? '\nLast error: ' + S.lastError : ''}\n\n/help for all commands`);
+    return say(`📊 Status\nMode: ${S.paused ? 'PAUSED' : CFG.PAPER === 1 ? '📄 PAPER (practice, no real money)' : S.unlocked ? 'AUTO' : 'CONFIRM (you tap to buy)'}\nAuto 15-min: ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : S.led.safe ? 'ON · 🛡 SAFE MODE today (1 contract, 5¢+ edges)' : 'ON'} · today ${money(S.led.fast || 0)}/${CFG.FAST_DAY > 0 ? money(CFG.FAST_DAY) : 'no limit'} · result ${(S.led.autoPnl || 0) >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\nAuto hourly: ${CFG.AUTO_HOURLY !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : S.led.safe ? 'ON · 🛡 SAFE MODE' : 'ON'} · always-in ${CFG.ALWAYS_IN === 1 ? 'ON' : 'OFF'} · 🛡 reserve ${money(resv(a))} · max ${Math.round(CFG.TRADE_PCT * 100)}% of wallet/trade\nCash: ${money(a.cash)} · 📋 limit bids ${CFG.MAKER === 1 ? `ON (${Object.keys(S.rest || {}).length} resting)` : 'OFF'} · sizing ${CFG.KELLY > 0 ? `½-Kelly, max ${Math.round(CFG.TRADE_PCT * 100)}%/trade` : 'fixed'}\nProfit since start: ${money(a.profit)} (auto at ${money(CFG.UNLOCK_PROFIT)})\nToday: ${money(a.spent)} of ${money(a.dayCap)} · max ${money(a.tradeCap)}/trade\nLast scan: ${S.lastScan ? timeCT(S.lastScan) : 'not yet'}${S.lastError ? '\nLast error: ' + S.lastError : ''}\n\n/help for all commands`);
   } catch (e) { return say('⚠️ Can\'t reach Kalshi: ' + e.message.slice(0, 200)); }
 }
 
@@ -1199,7 +1271,7 @@ http.createServer((rq, rs) => {
     { command: 'claude', description: 'Talk to Claude / ask for changes' }, { command: 'status', description: 'Money, profit & mode' },
     { command: 'stats', description: 'Prediction scorecard' }, { command: 'settings', description: 'See all settings' }, { command: 'set', description: 'Change a setting: /set trade 3' },
     { command: 'scan', description: 'Scan for trades now' }, { command: 'pause', description: 'Stop trading' }, { command: 'resume', description: 'Start again' },
-    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'report', description: 'Today: trades, wins, losses, P&L' }, { command: 'news', description: 'Market-moving news + pauses' }, { command: 'research', description: 'What the self-test learned' }, { command: 'coins', description: 'Which coins/markets are live' }, { command: 'learn', description: 'Self-learning results per market' }, { command: 'bids', description: 'Resting limit bids' }, { command: 'why', description: 'Why it is/isn\'t trading 15-min now' }, { command: 'rollback', description: 'Undo last code change' },
+    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'report', description: 'Today: trades, wins, losses, P&L' }, { command: 'news', description: 'Market-moving news + pauses' }, { command: 'research', description: 'What the self-test learned' }, { command: 'coins', description: 'Which coins/markets are live' }, { command: 'learn', description: 'Self-learning results per market' }, { command: 'bids', description: 'Resting limit bids' }, { command: 'paper', description: 'Practice-trading record' }, { command: 'why', description: 'Why it is/isn\'t trading 15-min now' }, { command: 'rollback', description: 'Undo last code change' },
     { command: 'help', description: 'All commands' }] });
   await loadSettings(); schedule();
   try { const me = await tg('getMe', {}); log('SELFCHECK telegram', me.ok ? 'OK @' + me.result.username : 'FAILED'); } catch (e) { log('SELFCHECK telegram FAILED', e.message); }
@@ -1310,6 +1382,7 @@ async function gradeAutoTrades() {
 
 async function scoreAlerts() {
   await gradeAutoTrades();
+  await paperGrade().catch(e => log('paper grade failed', e.message));
   const due = S.sc.open.filter(o => Date.now() > o.c + 3 * 60e3);
   let changed = false;
   for (const o of due) {
