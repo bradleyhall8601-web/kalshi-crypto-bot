@@ -44,6 +44,9 @@ const CFG = {
   TRADE_PCT: 0.25,   // never put more than 25% of the wallet into one trade
   RESERVE: 1.00,     // always keep this much cash untouched so the account never hits $0
   AUTO_HOURLY: 1,    // auto-trade hourly markets too
+  ALWAYS_IN: 1,      // hold a position in every market window (BTC/ETH hourly + 15-min) when the better side is not negative after fees
+  ALWAYS_EDGE: 0,    // min edge (¢) for always-in entries (0 = break-even or better)
+  ALWAYS_PCT: 0.10,  // always-in entries use 10% of wallet
   MAX_ALERTS_PER_RUN: 2, ALERT_TTL_MIN: 4, MAX_SLIPPAGE: 0.02,
   SCAN_EVERY_MIN: 1, TZ: 'America/Chicago',
 };
@@ -55,6 +58,9 @@ const SETTINGS = {
   day:      { key: 'SMALL_DAY', desc: 'max $ per day (0 = no limit)', min: 0, max: 10000 },
   tradepct: { key: 'TRADE_PCT', desc: 'max share of wallet per trade (0.25 = 25%)', min: 0.01, max: 1 },
   reserve:  { key: 'RESERVE', desc: '$ always kept in the wallet (never traded)', min: 0, max: 100000 },
+  always:   { key: 'ALWAYS_IN', desc: 'always hold one position per market window (1 = on, 0 = off)', min: 0, max: 1 },
+  alwaysedge: { key: 'ALWAYS_EDGE', desc: 'always-in: min edge in ¢ (0 = break-even; negative = force)', min: -10, max: 20 },
+  alwayspct: { key: 'ALWAYS_PCT', desc: 'always-in: share of wallet per entry (0.10 = 10%)', min: 0.01, max: 0.5 },
   auto1h:   { key: 'AUTO_HOURLY', desc: 'auto-trade hourly markets (1 = on, 0 = off)', min: 0, max: 1 },
   unlock:   { key: 'UNLOCK_PROFIT', desc: '$ profit before auto-trading', min: 0, max: 100000 },
   relock:   { key: 'RELOCK_PROFIT', desc: 'drop back to confirm below this $ profit', min: -100000, max: 100000 },
@@ -84,7 +90,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 6; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 7; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok || /not modified/.test(r.error || '')) return; }
@@ -100,6 +106,7 @@ async function loadSettings() {
     const blob = JSON.parse(pm.text.slice(pm.text.indexOf('{')));
     for (const x of Object.values(SETTINGS)) if (typeof blob[x.key] === 'number') CFG[x.key] = blob[x.key];
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
+    if (!(blob.v >= 7)) { CFG.ALWAYS_IN = 1; CFG.ALWAYS_EDGE = 0; CFG.ALWAYS_PCT = 0.10; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 6)) { CFG.SMALL_DAY = 0; CFG.FAST_DAY = 0; CFG.FAST_MAX_LOSS = 0; CFG.AUTO_HOURLY = 1; CFG.TRADE_PCT = 0.25; CFG.RESERVE = 1; setTimeout(saveSettings, 2000); } // continuous auto, wallet protection
     if (!(blob.v >= 5)) { CFG.AUTO_FAST = 1; setTimeout(saveSettings, 2000); } // switch on auto 15-min once
     if (!(blob.v >= 4)) { CFG.VOL_MULT = 1.0; CFG.MIN_EDGE = 0.04; CFG.MIN_PRICE = Math.max(CFG.MIN_PRICE, 0.15); if (typeof blob.MODEL_WEIGHT !== 'number') CFG.MODEL_WEIGHT = 0.5; setTimeout(saveSettings, 2000); }
@@ -142,7 +149,8 @@ async function rollDay(today) {
   if (S.led.day && (S.led.n || S.led.w || S.led.l)) await say(dayReport(S.led, 'DAILY REPORT (yesterday)'));
   S.led = { ...newLed(today), auto: S.led.auto || [] };
 }
-const S = { win: {}, learn: {}, newsSeen: new Set(), newsLog: [], newsPauseUntil: 0, newsPauseWhy: '', lastCond: {}, stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+const S = { bootAt: Date.now(), win: {}, // per market window: best verdict seen, traded or not
+   learn: {}, newsSeen: new Set(), newsLog: [], newsPauseUntil: 0, newsPauseWhy: '', lastCond: {}, stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
@@ -529,11 +537,23 @@ async function scan(fast) {
       for (const v of verdicts) {
         if (env.BOT_DEBUG === '1') log('EVAL', m.ticker, v.side, JSON.stringify({ raw: v.raw, mkt: v.mkt, p: v.p, ask: v.ask, edge: v.edge, reasons: v.reasons }));
         if (!W0.best || v.edge > W0.best.edge) W0.best = { edge: v.edge, side: v.side, reasons: v.reasons.slice(0, 2) };
+        if (!W0.bestV || v.edge > W0.bestV.edge) W0.bestV = { ...v, m, product, at: now, cond: condLine(cond[product], cond[product === 'BTC-USD' ? 'ETH-USD' : 'BTC-USD']) };
       }
       for (const v of verdicts) if (v.ok) cands.push({ m, product, ...v, cond: condLine(cond[product], cond[product === 'BTC-USD' ? 'ETH-USD' : 'BTC-USD']) });
     }
   }
   for (const [k, v] of Object.entries(S.sc.ev)) if (v < Date.now() - 60e3) delete S.sc.ev[k];
+  // always-in: every open window without a qualifying trade gets its better side, if not negative after fees
+  if (CFG.ALWAYS_IN === 1) {
+    const have = new Set(cands.map(c => c.m.event_ticker));
+    for (const [ev, w] of Object.entries(S.win)) {
+      const v = w.bestV; if (!v || have.has(ev) || w.traded || isFast(w.series) !== !!fast || Date.now() - v.at > 30e3) continue;
+      if (a.held.has(ev) || S.sc.ev[ev]) continue;
+      const blockers = v.reasons.filter(r => !/^edge .* below/.test(r) && !/^price .* outside/.test(r));
+      if (blockers.length || !(v.ask >= 0.10 && v.ask <= 0.90) || v.edge < CFG.ALWAYS_EDGE / 100) continue;
+      cands.push({ ...v, always: true });
+    }
+  }
   cands.sort((x, y) => y.edge - x.edge);
   const openBefore = S.sc.open.length;
   const used = new Set(); let sent = 0;
@@ -547,17 +567,22 @@ async function scan(fast) {
     let limit = null;
     if ((autoFast || autoHour) && !S.unlocked) {
       if (!c.m._live) { // hourly list prices can lag: re-price from the live book before trading
-        try { const live = await withLiveQuote(c.m); const v = evaluate(live, S.lastCond[c.product]).find(x => x.side === c.side); if (!v || !v.ok) continue; Object.assign(c, v, { m: live }); } catch (e) { continue; }
+        try {
+          const live = await withLiveQuote(c.m); const v = evaluate(live, S.lastCond[c.product]).find(x => x.side === c.side);
+          const blocked = !v || (c.always ? v.reasons.some(r => !/^edge .* below/.test(r) && !/^price .* outside/.test(r)) || v.edge < CFG.ALWAYS_EDGE / 100 : !v.ok);
+          if (blocked) continue; Object.assign(c, v, { m: live });
+        } catch (e) { continue; }
       }
-      if (c.edge < CFG.AUTO_EDGE) continue;                       // auto needs the bigger edge
-      limit = bestLimit(c.p, c.ask, CFG.AUTO_EDGE / 2, fastSeries ? CFG.AUTO_GRACE : 0.02); if (limit === null) continue;
+      if (!c.always && c.edge < CFG.AUTO_EDGE) continue;          // full-size auto needs the bigger edge
+      limit = c.always ? bestLimit(c.p, c.ask, CFG.ALWAYS_EDGE / 100, fastSeries ? CFG.AUTO_GRACE : 0.02) : bestLimit(c.p, c.ask, CFG.AUTO_EDGE / 2, fastSeries ? CFG.AUTO_GRACE : 0.02);
+      if (limit === null) continue;
     } else if (auto) {
       limit = bestLimit(c.p, c.ask, CFG.MIN_EDGE / 2, fastSeries ? CFG.AUTO_GRACE : 0.01); if (limit === null) continue;
     }
     // size within: per-trade cap, today's remaining budget, AND the cash actually in the wallet (fees + slippage included)
     const worst = limit || Math.min(c.ask + CFG.MAX_SLIPPAGE, 0.99);
     const fastLeft = autoFast && !S.unlocked && CFG.FAST_DAY > 0 ? CFG.FAST_DAY - (S.led.fast || 0) : Infinity;
-    const budget = Math.min(a.tradeCap, remaining, a.cash - Math.max(CFG.RESERVE, 0.02), fastLeft);
+    const budget = Math.min(a.tradeCap, remaining, a.cash - Math.max(CFG.RESERVE, 0.02), fastLeft, c.always ? Math.max(0.5, a.cash * CFG.ALWAYS_PCT) : Infinity);
     let count = Math.floor(budget / worst);
     while (count > 0 && count * worst + feeTotal(count, worst) > budget) count--;
     if (auto) { const depth = bookDepth(c.m, c.side, worst); if (depth < count) count = Math.floor(depth); if (count < 1 && c.m._book) { log('no liquidity', c.m.ticker, c.side, worst); continue; } }
@@ -597,7 +622,7 @@ async function scan(fast) {
           if (fastSeries) S.led.fast = (S.led.fast || 0) + r.total;
           { S.led.auto.push({ t: c.m.ticker, s: c.side[0], n: r.filled, cost: Math.round(r.total * 100) / 100, c: Date.parse(c.m.close_time) }); if (S.led.auto.length > 30) S.led.auto.shift(); }
           await saveSettings().catch(() => {});
-          await say(`🟢🤖 AUTO BUY · ${label(c.m.ticker)}\n` +
+          await say(`🟢🤖 AUTO BUY${c.always ? ' (always-in)' : ''} · ${label(c.m.ticker)}\n` +
             `🎟 ${r.filled} ${c.side.toUpperCase()}${fastSeries ? (c.side === 'yes' ? ' (⬆️ up)' : ' (⬇️ down)') : ''} @ ${cents(r.px)} = ${money(r.total)} (fee ${money(r.fees)})\n` +
             `🎯 Win chance ${Math.round(c.p * 100)}% · paid ${cents(r.px)} · edge +${((c.p - r.px - 0.07 * r.px * (1 - r.px)) * 100).toFixed(1)}¢\n` +
             `✅ Win pays ${money(r.filled)} (+${money(r.filled - r.total)}) · ❌ lose −${money(r.total)}\n` +
@@ -852,7 +877,7 @@ async function onUpdate(u) {
   }
   try {
     const a = await account();
-    return say(`📊 Status\nMode: ${S.paused ? 'PAUSED' : S.unlocked ? 'AUTO' : 'CONFIRM (you tap to buy)'}\nAuto 15-min: ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today (loss limit)' : 'ON'} · today ${money(S.led.fast || 0)}/${CFG.FAST_DAY > 0 ? money(CFG.FAST_DAY) : 'no limit'} · result ${(S.led.autoPnl || 0) >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\nAuto hourly: ${CFG.AUTO_HOURLY !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : 'ON'} · 🛡 reserve ${money(CFG.RESERVE)} · max ${Math.round(CFG.TRADE_PCT * 100)}% of wallet/trade\nCash: ${money(a.cash)}\nProfit since start: ${money(a.profit)} (auto at ${money(CFG.UNLOCK_PROFIT)})\nToday: ${money(a.spent)} of ${money(a.dayCap)} · max ${money(a.tradeCap)}/trade\nLast scan: ${S.lastScan ? timeCT(S.lastScan) : 'not yet'}${S.lastError ? '\nLast error: ' + S.lastError : ''}\n\n/help for all commands`);
+    return say(`📊 Status\nMode: ${S.paused ? 'PAUSED' : S.unlocked ? 'AUTO' : 'CONFIRM (you tap to buy)'}\nAuto 15-min: ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today (loss limit)' : 'ON'} · today ${money(S.led.fast || 0)}/${CFG.FAST_DAY > 0 ? money(CFG.FAST_DAY) : 'no limit'} · result ${(S.led.autoPnl || 0) >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\nAuto hourly: ${CFG.AUTO_HOURLY !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : 'ON'} · always-in ${CFG.ALWAYS_IN === 1 ? 'ON' : 'OFF'} · 🛡 reserve ${money(CFG.RESERVE)} · max ${Math.round(CFG.TRADE_PCT * 100)}% of wallet/trade\nCash: ${money(a.cash)}\nProfit since start: ${money(a.profit)} (auto at ${money(CFG.UNLOCK_PROFIT)})\nToday: ${money(a.spent)} of ${money(a.dayCap)} · max ${money(a.tradeCap)}/trade\nLast scan: ${S.lastScan ? timeCT(S.lastScan) : 'not yet'}${S.lastError ? '\nLast error: ' + S.lastError : ''}\n\n/help for all commands`);
   } catch (e) { return say('⚠️ Can\'t reach Kalshi: ' + e.message.slice(0, 200)); }
 }
 
@@ -983,6 +1008,10 @@ async function tick(fast = false, both = false) {
 if (env.BOT_TEST !== '1') { // tests drive scans manually
   setInterval(() => tick(true), 10e3); // 15-min markets checked every 10 seconds (own lock)
   setTimeout(() => tick(false), 15000);
+  setInterval(() => { // watchdog: a stalled bot restarts itself (Render brings it right back)
+    const last = S.stats.fast[S.stats.fast.length - 1] || S.bootAt;
+    if (Date.now() - last > 120e3 && Date.now() - S.bootAt > 180e3) { log('WATCHDOG stall — restarting'); say('♻️ Bot stalled for 2 min — restarting itself now.').finally(() => setTimeout(() => process.exit(1), 1500)); }
+  }, 30e3);
   setInterval(() => { // heartbeat: proves scanning is continuous
     const st = S.stats; log('HEARTBEAT', JSON.stringify({ fast5m: st.fast.filter(t => Date.now() - t < 5 * 60e3).length, slow5m: st.slow.filter(t => Date.now() - t < 5 * 60e3).length, skipped: st.skipped, lastError: S.lastError }));
     if (CFG.AUTO_FAST === 1 && !S.paused && st.fast.filter(t => Date.now() - t < 5 * 60e3).length < 10 && Date.now() - (S.lastStallAlert || 0) > 30 * 60e3) { S.lastStallAlert = Date.now(); say('⚠️ 15-min scanning is falling behind (fewer than 10 checks in 5 min). Investigating automatically; last error: ' + (S.lastError || 'none')); }

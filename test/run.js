@@ -35,7 +35,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(W.tg.some(x => x.method === 'setMyCommands' && x.body.commands.some(c => c.command === 'stats')), 'command menu set');
   ok(msgs().some(m => /Bot running/.test(m.text)), 'startup message sent');
 
-  await post({ message: { chat: { id: 42 }, text: '/set auto1h 0' } }); await wait(200);
+  await post({ message: { chat: { id: 42 }, text: '/set auto1h 0' } }); await post({ message: { chat: { id: 42 }, text: '/set always 0' } }); await wait(300);
   console.log('\n2. Security');
   let r = await post({ message: { chat: { id: 42 }, text: '/status' } }, {});
   ok(r.status === 403, 'webhook without secret rejected (403)');
@@ -307,6 +307,28 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   await send(post, '/scan'); await wait(2500);
   ok(W.orders.length === oh, 'no trade that would dip into the $1 reserve');
   await send(post, '/set auto1h 0'); await wait(200); W.shards = { 0: 7, 2: 0 }; clearMarkets();
+
+  console.log('\n11l. Always-in: one position in each of the 4 markets');
+  clearMarkets(); W.shards = { 0: 10, 2: 0 }; W.live = null;
+  await send(post, '/set always 1'); await send(post, '/set auto1h 1'); await wait(300);
+  clearMarkets(); for (const k of Object.keys(W.markets)) delete W.markets[k];
+  // small edges (below the 5¢ auto bar but positive after fees) in all four markets
+  const al = [market('KXBTC15M', 'btc', 9, 59995, -0.10, { m: { strike_type: 'greater_or_equal' } }), market('KXETH15M', 'eth', 9, 1679.95, -0.10, { m: { strike_type: 'greater_or_equal' } }),
+              market('KXBTCD', 'btc', 40, 60025, 0.10), market('KXETHD', 'eth', 40, 1679.1, 0.10)];
+  let oa = W.orders.length;
+  await send(post, '/scan'); await wait(6000); await send(post, '/scan'); await wait(6000);
+  const tick4 = new Set(W.orders.slice(oa).map(o => o.ticker.split('-')[0]));
+  ok(['KXBTC15M', 'KXETH15M', 'KXBTCD', 'KXETHD'].every(x => tick4.has(x)), 'always-in holds a position in all 4 markets', [...tick4].join(','));
+  ok(msgs().filter(m => /AUTO BUY \(always-in\)/.test(m.text)).length >= 4, 'always-in entries reported');
+  const sizes = W.orders.slice(oa).map(o => Number(o.count) * (o.side === 'bid' ? Number(o.price) : 1 - Number(o.price)));
+  ok(sizes.every(x => x <= 10 * 0.10 + 0.05), 'always-in entries sized ~10% of wallet', sizes.map(x => x.toFixed(2)).join(','));
+  await send(post, '/scan'); await wait(5000);
+  ok(W.orders.length - oa === 4, 'still exactly one position per window (no duplicates)', W.orders.length - oa);
+  // negative edge on both sides -> never forced
+  clearMarkets(); market('KXBTC15M', 'btc', 9, 59996, 0.0, { spread: 0.05, m: { strike_type: 'greater_or_equal' } }); oa = W.orders.length;
+  await send(post, '/_fasttick'); await wait(2500);
+  ok(W.orders.length === oa, 'never forces a trade that loses money on average (both sides negative after fees)');
+  await send(post, '/set always 0'); await send(post, '/set auto1h 0'); await wait(300); clearMarkets(); W.shards = { 0: 7, 2: 0 };
 
   console.log('\n11k. Window recap: every window reports traded or why not');
   clearMarkets(); W.shards = { 0: 7, 2: 0 };
