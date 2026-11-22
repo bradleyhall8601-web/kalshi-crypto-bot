@@ -169,7 +169,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   clearMarkets();
   const cases = [
     ['sudden BTC drop', () => { W.shock = { coin: 'btc', pct: -0.02 }; }],
-    ['exchanges disagree', () => { W.krakenSkew = 1.01; }],
+    ['exchanges disagree', () => { W.krakenSkew = 1.01; W.geminiSkew = 1.01; }],
     ['only one exchange', () => { W.down.kraken = true; W.down.bitstamp = true; W.down.gemini = true; }],
     ['model vs market gap > 18 pts', () => {}, 0.25],
     ['thin market', () => {}, 0.16, { spread: 0.10 }],
@@ -180,7 +180,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
     market('KXBTCD', 'btc', 40, 60030 + Math.floor(Math.random() * 20), gap, opts);
     await send(post, '/scan'); await wait(700);
     ok(alerts().length === n0, `blocked: ${name}`);
-    W.shock = null; W.krakenSkew = 1; W.down = {}; clearMarkets();
+    W.shock = null; W.krakenSkew = 1; W.geminiSkew = 1; W.down = {}; clearMarkets();
   }
 
   console.log('\n11. Auto 15-minute trading');

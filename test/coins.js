@@ -63,7 +63,7 @@ if (!RESTARTED) {
 
   console.log('\n1. Every coin is on by default');
   await send('/settings'); await wait(300);
-  ok(['KXBTCD', 'KXETH15M', 'KXSOLD', 'KXSOL15M', 'KXXRP15M', 'KXDOGED', 'KXBNB15M', 'KXHYPED', 'KXHYPE15M', 'KXNEAR15M', 'KXZECD', 'KXZEC15M'].every(x => last().includes(x)), 'BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, NEAR, ZEC hourly/daily + 15-min all selected', last().split('markets = ')[1]);
+  ok(['KXBTCD', 'KXETH15M', 'KXNEARH', 'KXZECH', 'KXSOLD', 'KXSOL15M', 'KXXRP15M', 'KXDOGED', 'KXBNB15M', 'KXHYPED', 'KXHYPE15M', 'KXNEAR15M', 'KXZECD', 'KXZEC15M'].every(x => last().includes(x)), 'BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, NEAR, ZEC hourly/daily + 15-min all selected', last().split('markets = ')[1]);
 
   console.log('\n2. Self-learning from real results');
   await send('/scan'); await wait(4000);
@@ -93,12 +93,22 @@ if (!RESTARTED) {
   await send('/_fasttick'); await wait(2500);
   ok(cb1 >= 1 && W.urls.filter(u => /coinbase.*HYPE/.test(u)).length === 0, 'exchanges that do not list a coin are not asked again', cb1);
   W.unlisted = {};
+  clear(); W.hlSkew = 1.007; o0 = W.orders.length; // Hyperliquid's perp price runs 0.7% above 4 spot exchanges
+  const h2 = market('KXHYPE15M', 'hype', 9, 37.98, -0.17);
+  await send('/_fasttick'); await wait(3000);
+  ok(orders().slice(o0).includes(h2.ticker), 'one odd price source is left out instead of pausing the coin', orders().slice(o0).join(','));
+  W.hlSkew = 1; W.krakenSkew = 1.01; W.geminiSkew = 1.01; clear(); o0 = W.orders.length; // a real 2-vs-2 split → stay paused
+  const s9 = market('KXXRP15M', 'xrp', 9, 2.0989, -0.17);
+  await send('/_fasttick'); await wait(3000);
+  ok(!orders().slice(o0).includes(s9.ticker), 'exchanges split down the middle → coin stays paused');
+  W.krakenSkew = 1; W.geminiSkew = 1; clear(); await send('/_fasttick'); await wait(1500);
 
   console.log('\n5. Shock rules across coins');
   clear(); W.shock = { coin: 'btc', pct: -0.02 }; o0 = W.orders.length;
   const s1 = market('KXSOL15M', 'sol', 9, 139.93, -0.17);
   await send('/_fasttick'); await wait(2500);
-  ok(!orders().slice(o0).includes(s1.ticker) && msgs().some(m => /🚧 SOL trading paused — BTC sudden drop/.test(m)), 'a BTC crash pauses SOL too');
+  await send('/why'); await wait(300);
+  ok(!orders().slice(o0).includes(s1.ticker) && /SOL: ⏸ blocked — .*BTC sudden drop/.test(last()), 'a BTC crash pauses SOL too', last());
   clear(); W.shock = { coin: 'sol', pct: -0.03 }; o0 = W.orders.length;
   const b1 = market('KXBTC15M', 'btc', 9, 59970, -0.17), s2 = market('KXSOL15M', 'sol', 9, 139.93, -0.17);
   await send('/_fasttick'); await wait(3000);
@@ -106,7 +116,7 @@ if (!RESTARTED) {
   W.shock = null; await send('/_fasttick'); await wait(1500);
 
   console.log('\n6. Daily markets (5 PM ET)');
-  clear(); o0 = W.orders.length;
+  clear(); await wait(21000); o0 = W.orders.length; // let Kalshi's position list (cached 20s) show the closed positions gone
   const nx = next5pmET(), mins = (nx.t - Date.now()) / 60e3;
   const dly = market('KXBTCD', 'btc', mins, 59900, -0.17, { ev: `KXBTCD-${nx.code}`, close: nx.t });
   const far = market('KXBTCD', 'btc', 300, 59900, -0.12, { close: Math.floor((Date.now() + 300 * 60e3) / 3600e3) * 3600e3 + 1800e3 }); // ~5h out at :30 → not a daily, not within the hour

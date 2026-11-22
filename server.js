@@ -24,10 +24,11 @@ const PREFIX = '/trade-api/v2';
 
 // every coin Kalshi lists crypto price markets for: hourly/daily (KX<coin>D) and 15-minute (KX<coin>15M)
 const COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'HYPE', 'NEAR', 'ZEC'];
-const ALL_SERIES = COINS.flatMap(c => [`KX${c}D`, `KX${c}15M`]);
+const HOURLY_ALT = { NEAR: 'KXNEARH', ZEC: 'KXZECH' }; // Kalshi runs these coins' hourly markets under an "H" series
+const ALL_SERIES = COINS.flatMap(c => [`KX${c}D`, ...(HOURLY_ALT[c] ? [HOURLY_ALT[c]] : []), `KX${c}15M`]);
 const CFG = {
   SERIES: (env.BOT_SERIES || ALL_SERIES.join(',')).split(',').map(s => s.trim()).filter(Boolean),
-  SPOT: Object.fromEntries(COINS.flatMap(c => [[`KX${c}D`, `${c}-USD`], [`KX${c}`, `${c}-USD`], [`KX${c}15M`, `${c}-USD`]])),
+  SPOT: Object.fromEntries(COINS.flatMap(c => [[`KX${c}D`, `${c}-USD`], [`KX${c}H`, `${c}-USD`], [`KX${c}`, `${c}-USD`], [`KX${c}15M`, `${c}-USD`]])),
   FAST_MIN_MINUTES: 1.5, FAST_MAX_MINUTES: 15, // 15-minute markets: trade while 1.5-15 min remain
   MIN_EDGE: Number(env.BOT_MIN_EDGE || 0.04), MAX_EDGE: 0.25, MAX_DISAGREE: 0.18,
   SHOCK_PCT: 0.006, // a 5-min move must be > 0.6% (and > 4x normal) to count as a shock
@@ -92,8 +93,8 @@ const SETTINGS = {
   learn:    { key: 'LEARN', desc: 'self-learning from real results (1 = on, 0 = off)', min: 0, max: 1 },
   fastloss: { key: 'FAST_MAX_LOSS', desc: 'stop auto for the day after losing $ (0 = 40% of start-of-day wallet)', min: 0, max: 10000 },
 };
-const COIN_SERIES = Object.fromEntries(COINS.map(c => [c, [`KX${c}D`, `KX${c}15M`]]));
 const coinOf = t => (String(t).match(new RegExp(`^KX(${COINS.join('|')})`)) || [])[1] || '';
+const COIN_SERIES = Object.fromEntries(COINS.map(c => [c, ALL_SERIES.filter(x => coinOf(x) === c)]));
 const isFast = s => /15M$/.test(s);
 const ttlFor = ticker => isFast(String(ticker).split('-')[0]) ? CFG.FAST_TTL_MIN : CFG.ALERT_TTL_MIN;
 let pinnedId = null;
@@ -102,7 +103,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 8; blob.LANES = S.lanes; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 9; blob.LANES = S.lanes; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -121,6 +122,7 @@ async function loadSettings() {
     const blob = zi >= 0 ? JSON.parse(zlib.inflateRawSync(Buffer.from(pm.text.slice(zi + 3).trim(), 'base64')).toString()) : JSON.parse(pm.text.slice(pm.text.indexOf('{')));
     for (const x of Object.values(SETTINGS)) if (typeof blob[x.key] === 'number') CFG[x.key] = blob[x.key];
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
+    if (!(blob.v >= 9)) { for (const x of Object.values(HOURLY_ALT)) if (!CFG.SERIES.includes(x) && CFG.SERIES.some(y => coinOf(y) === coinOf(x))) CFG.SERIES.push(x); setTimeout(saveSettings, 2000); } // NEAR/ZEC hourly live under KX..H
     if (!(blob.v >= 8)) { for (const x of ALL_SERIES) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); CFG.FAST_STREAK = Math.max(CFG.FAST_STREAK || 0, 8); CFG.DAILY = 1; CFG.MAX_OPEN_PCT = 0.6; CFG.LEARN = 1; setTimeout(saveSettings, 2000); } // all coins + daily + self-learning
     if (!(blob.v >= 7)) { CFG.ALWAYS_IN = 1; CFG.ALWAYS_EDGE = 0; CFG.ALWAYS_PCT = 0.10; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 6)) { CFG.SMALL_DAY = 0; CFG.FAST_DAY = 0; CFG.FAST_MAX_LOSS = 0; CFG.AUTO_HOURLY = 1; CFG.TRADE_PCT = 0.25; CFG.RESERVE = 1; setTimeout(saveSettings, 2000); } // continuous auto, wallet protection
@@ -146,7 +148,7 @@ function label(ticker) {
   const [ser, ev, k] = String(ticker).split('-');
   const coin = coinOf(ser) || ser;
   const tm = (ev || '').match(/^\d{2}[A-Z]{3}\d{2}(\d{2})(\d{2})?$/);
-  const kind = /15M$/.test(ser) ? '15-min' : /D$/.test(ser) ? (tm && tm[1] === '17' && !tm[2] ? 'daily' : 'hourly') : '';
+  const kind = /15M$/.test(ser) ? '15-min' : /[DH]$/.test(ser) ? (tm && tm[1] === '17' && !tm[2] ? 'daily' : 'hourly') : '';
   let when = '';
   if (tm) { let h = (Number(tm[1]) + 23) % 24; const mm = tm[2] || '00'; when = `${h % 12 || 12}:${mm} ${h < 12 ? 'AM' : 'PM'} CT`; } // ticker time is ET
   const strike = k && /^T[\d.]+$/.test(k) ? ` ≥ ${money(Math.ceil(Number(k.slice(1))))}` : '';
@@ -280,7 +282,7 @@ async function accountRaw() {
   const live = (pos.market_positions || []).filter(p => cnt(p, 'position') !== 0);
   const held = new Set(live.map(p => p.ticker.split('-').slice(0, -1).join('-')));
   const exps = live.map(p => d(p, 'market_exposure')).filter(x => x === x);
-  const exposure = exps.length ? exps.reduce((a, x) => a + Math.abs(x), 0) : null; // $ tied up in open positions (Kalshi's own number)
+  const exposure = !live.length ? 0 : exps.length ? exps.reduce((a, x) => a + Math.abs(x), 0) : null; // $ tied up in open positions (Kalshi's own number)
 
   if (!S.unlocked && !S.manualLock && profit >= CFG.UNLOCK_PROFIT) { S.unlocked = true; await say(`🔓 Profit hit ${money(profit)}. Auto-trading ON (${CFG.SCALED_TRADE_PCT*100}% of balance per trade, ${CFG.SCALED_DAY_PCT*100}% per day). /lock to stop.`); }
   else if (S.unlocked && profit < CFG.RELOCK_PROFIT) { S.unlocked = false; await say(`🔒 Profit fell to ${money(profit)}. Back to confirm mode (${money(CFG.SMALL_TRADE)}/trade, ${money(CFG.SMALL_DAY)}/day).`); }
@@ -427,7 +429,15 @@ async function coinState(product) {
   const candles = c.slice().reverse(); // oldest -> newest: [time, low, high, open, close, vol]
   const r = []; for (let i = 1; i < candles.length; i++) r.push(Math.log(candles[i][4] / candles[i - 1][4]));
   const freshP = prices.filter(x => !(x.at > 0) || Date.now() - x.at < 30e3); // stale exchanges are dropped, not averaged in
-  const pxs = (freshP.length ? freshP : prices).map(x => x.px).sort((a, b) => a - b);
+  let pool = (freshP.length ? freshP : prices).slice();
+  const med = a => { const v = a.map(x => x.px).sort((x, y) => x - y); return v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2; };
+  const thr = /^(BTC|ETH)-/.test(product) ? 0.002 : 0.005, dropped = [];
+  const spr = a => { const v = a.map(x => x.px); return (Math.max(...v) - Math.min(...v)) / med(a); };
+  if (pool.length >= 3 && spr(pool) > thr) { // ONE exchange off from all the others (thin book, perp premium): leave it out instead of pausing the coin
+    const m0 = med(pool), far = pool.slice().sort((a, b) => Math.abs(b.px - m0) - Math.abs(a.px - m0))[0], rest = pool.filter(x => x !== far);
+    if (spr(rest) <= thr) { dropped.push(far.src); pool = rest; } // if the rest still disagree, it's a real split: stay paused
+  }
+  const pxs = pool.map(x => x.px).sort((a, b) => a - b);
   const spot = !pxs.length ? NaN : pxs.length % 2 ? pxs[(pxs.length - 1) / 2] : (pxs[pxs.length / 2 - 1] + pxs[pxs.length / 2]) / 2; // median across exchanges
   const sig1h = sd(r.slice(-60)), sig5h = sd(r.slice(-300)), sig15 = sd(r.slice(-15));
   const sig = Math.sqrt((sig1h * sig1h + sig5h * sig5h) / 2) * CFG.VOL_MULT; // blend, not max (max overstates swings)
@@ -438,7 +448,7 @@ async function coinState(product) {
   const freshest = Math.max(...prices.map(x => x.at || 0));
   const major = /^(BTC|ETH)-/.test(product);
   const st = {
-    product, spot, sig, sig15, sig5h, sources: freshP.map(x => x.src),
+    product, spot, sig, sig15, sig5h, sources: pool.map(x => x.src), dropped, allPx: prices.map(x => `${x.src}=${x.px}`).join(' '),
     r5: ret(5), r15: ret(15),
     ageSec: Math.max(0, Math.round((Date.now() - freshest) / 1000)),
     candleLagSec: Math.round(nowS - candles[candles.length - 1][0]),
@@ -447,10 +457,10 @@ async function coinState(product) {
   st.z5 = st.r5 / (sig * Math.sqrt(5)); st.z15 = st.r15 / (sig * Math.sqrt(15));
   st.problems = [];
   if (!(spot > 0) || r.length < 100) st.problems.push('price data missing');
-  if (freshP.length < 2) st.problems.push(`only ${freshP.length} live exchange price${freshP.length === 1 ? '' : 's'} available`);
+  if (pool.length < 2) st.problems.push(`only ${pool.length} live exchange price${pool.length === 1 ? '' : 's'} available`);
   if (st.ageSec > 30) st.problems.push(`live price ${st.ageSec}s old`);
   if (st.candleLagSec > 600) st.problems.push(`price history ${Math.round(st.candleLagSec / 60)} min behind`);
-  if (st.spreadPct > (major ? 0.002 : 0.005)) st.problems.push(`exchanges disagree ${(st.spreadPct * 100).toFixed(2)}%`); // small coins trade on thinner books
+  if (st.spreadPct > thr) st.problems.push(`exchanges disagree ${(st.spreadPct * 100).toFixed(2)}%`); // small coins trade on thinner books
   if (Math.abs(st.z5) > 4 && Math.abs(st.r5) > CFG.SHOCK_PCT * (major ? 1 : 1.5)) st.problems.push(`sudden ${st.r5 > 0 ? 'spike' : 'drop'} ${(st.r5 * 100).toFixed(2)}% in 5 min`);
   if (sig15 > 2.5 * sig5h) st.problems.push('volatility spiking');
   return st;
@@ -583,10 +593,10 @@ async function scan(fast) {
     S.emptyN = S.emptyN || {};
     if (!markets.length) { // Kalshi has nothing open here: after 5 empty looks, check less often (never for BTC/ETH)
       S.emptyN[series] = (S.emptyN[series] || 0) + 1;
-      if (S.emptyN[series] >= 5 && !/^KX(BTC|ETH)/.test(series)) { S.emptyN[series] = 0; S.emptyUntil[series] = Date.now() + (fast ? 1 : 5) * 60e3; }
+      if (S.emptyN[series] >= 5 && !(S.everHad || {})[series] && !/^KX(BTC|ETH)/.test(series)) { S.emptyN[series] = 0; S.emptyUntil[series] = Date.now() + (fast ? 1 : 5) * 60e3; } // only series that never had a market
       continue;
     }
-    S.emptyN[series] = 0;
+    S.emptyN[series] = 0; (S.everHad = S.everHad || {})[series] = 1;
     const lo = isFast(series) ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES, hi = isFast(series) ? CFG.FAST_MAX_MINUTES : CFG.MAX_MINUTES;
     const inWindow = (m, mins) => (mins >= lo && mins <= hi) || (!isFast(series) && CFG.DAILY === 1 && mins >= lo && mins <= 1440 && isDailyClose(m.close_time));
     S.blk = S.blk || {};
@@ -603,7 +613,7 @@ async function scan(fast) {
     if (cond[product].problems.length && isFast(series)) S.stats.last15[series] = { blocked: cond[product].problems.join('; '), at: Date.now() };
     if (cond[product].problems.length) for (const m of markets) { const mins = (Date.parse(m.close_time) - now) / 60000; if (inWindow(m, mins)) { const W1 = S.win[m.event_ticker] || (S.win[m.event_ticker] = { label: label(m.ticker).replace(/ ≥ \$[\d,.]+/, ''), series, close: Date.parse(m.close_time), best: null }); W1.blocked = cond[product].problems[0]; } }
     if (cond[product].problems.length) { if (env.BOT_DEBUG === '1') log('COND', product, cond[product].problems.join('; '));
-      if (!S.condWarn || Date.now() - S.condWarn > 15 * 60e3) { S.condWarn = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; ')); } continue; }
+      if (!S.condWarn || Date.now() - S.condWarn > 15 * 60e3) { S.condWarn = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; '), '|', cond[product].allPx || ''); } continue; }
     for (const m of markets) if (S.win[m.event_ticker]) S.win[m.event_ticker].close = Date.parse(m.close_time); // keep recap timing in sync with Kalshi
     for (let m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
@@ -1029,13 +1039,13 @@ async function coverageReport() {
   try { const r = await kalshi('GET', '/series?category=Crypto'); log('CRYPTO SERIES', (r.series || []).map(x => `${x.ticker}(${x.frequency || '?'})`).join(' ')); } catch (e) { log('series list failed', e.message); }
   const cond = await marketConditions(), now = Date.now(), lines = [];
   for (const c of activeCoins()) {
-    const parts = [];
-    for (const ser of [`KX${c}15M`, `KX${c}D`].filter(x => CFG.SERIES.includes(x))) {
+    const got = { m15: false, h1: false, d1: false }, any = { m15: false, h1: false };
+    for (const ser of CFG.SERIES.filter(x => coinOf(x) === c)) {
       let ms = []; try { ms = await pageAll(`/markets?series_ticker=${ser}&status=open`, 'markets'); } catch (e) {}
-      if (isFast(ser)) parts.push(`15-min ${ms.length ? '✅' : '—'}`);
-      else { const evs = new Set(ms.map(m => m.event_ticker)), daily = ms.some(m => isDailyClose(m.close_time) && Date.parse(m.close_time) - now < 1440 * 60e3);
-        parts.push(`hourly ${evs.size ? '✅' : '—'}`, `daily ${daily ? '✅' : '—'}`); }
+      if (isFast(ser)) { any.m15 = true; got.m15 = got.m15 || ms.length > 0; }
+      else { any.h1 = true; got.h1 = got.h1 || ms.length > 0; got.d1 = got.d1 || ms.some(m => isDailyClose(m.close_time) && Date.parse(m.close_time) - now < 1440 * 60e3); }
     }
+    const parts = [...(any.m15 ? [`15-min ${got.m15 ? '✅' : '—'}`] : []), ...(any.h1 ? [`hourly ${got.h1 ? '✅' : '—'}`, `daily ${got.d1 ? '✅' : '—'}`] : [])];
     const st = cond[c + '-USD'], src = st ? st.sources.length : 0;
     lines.push(`${src >= 2 && !(st.problems || []).some(x => /missing|only/.test(x)) ? '🟢' : '🟡'} ${c}: ${parts.join(' · ') || 'not selected'} · 💱 ${src} price feeds`);
   }

@@ -57,7 +57,7 @@ global.fetch = async (url, o = {}) => {
   const coinOf = s => { const m = String(s).toLowerCase().match(/(btc|xbt|eth|sol|xrp|doge|xdg|bnb|hype|near|zec)/); const c = m ? m[1] : 'btc'; return { xbt: 'btc', xdg: 'doge' }[c] || c; };
   if (u.includes('api.hyperliquid.xyz')) {
     if (W.down.hyperliquid) return J({}, 500);
-    if (b && b.type === 'allMids') return J(Object.fromEntries(['btc', 'eth', 'sol', 'xrp', 'doge', 'bnb', 'hype', 'near', 'zec'].map(c => [c.toUpperCase(), String(W[c] * (W.shock && W.shock.coin === c ? 1 + W.shock.pct : 1))])));
+    if (b && b.type === 'allMids') return J(Object.fromEntries(['btc', 'eth', 'sol', 'xrp', 'doge', 'bnb', 'hype', 'near', 'zec'].map(c => [c.toUpperCase(), String(W[c] * (W.shock && W.shock.coin === c ? 1 + W.shock.pct : 1) * (W.hlSkew || 1))])));
     if (b && b.type === 'candleSnapshot') { const c = b.req.coin.toLowerCase(); return J(genCandles(W[c], W.vol, 0).reverse().map(r => ({ t: r[0] * 1000, T: r[0] * 1000 + 59999, o: String(r[3]), c: String(r[4]), h: String(r[2]), l: String(r[1]), v: '1', n: 1 }))); }
   }
   const src = /coinbase/.test(u) ? 'coinbase' : /kraken/.test(u) ? 'kraken' : /bitstamp/.test(u) ? 'bitstamp' : /gemini/.test(u) ? 'gemini' : /hyperliquid/.test(u) ? 'hyperliquid' : '';
@@ -81,7 +81,7 @@ global.fetch = async (url, o = {}) => {
     return J({ price: String(px), time: new Date(W.now() - (W.stale.coinbase ? 120e3 : 1000)).toISOString() });
   }
   if (u.includes('api.kraken.com')) { if (W.down.kraken) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ result: { X: { c: [String(W[coin] * sh * (W.krakenSkew || 1))] } } }); }
-  if (u.includes('api.gemini.com')) { if (W.down.gemini) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ last: String(W[coin] * sh), volume: { timestamp: W.now() - (W.stale.gemini ? 120e3 : 0) } }); }
+  if (u.includes('api.gemini.com')) { if (W.down.gemini) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ last: String(W[coin] * sh * (W.geminiSkew || 1)), volume: { timestamp: W.now() - (W.stale.gemini ? 120e3 : 0) } }); }
   if (u.includes('bitstamp.net')) { if (W.down.bitstamp) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ last: String(W[coin] * sh), timestamp: String(Math.floor(W.now() / 1000) - (W.stale.bitstamp ? 120 : 1)) }); }
   // ---- Kalshi ----
   if (u.includes('kalshi')) {
