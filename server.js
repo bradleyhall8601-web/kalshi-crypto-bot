@@ -907,14 +907,19 @@ async function scan(fast) {
       for (const [ev, w] of wins) {
         if (restingFor(ev) || a.held.has(ev) || used.has(ev)) continue;
         const lk = laneOf(ev, w.mk.m.close_time); if (laneBenched(lk) || w.mk.edge < CFG.MAKER_EDGE + laneBar(lk)) continue;
-        const { q, v, m, product } = w.mk;
+        if ((S.bidCool || {})[ev] > Date.now()) continue;
+        let { q, v, m, product } = w.mk;
+        if (!m._live) { // list prices can lag (hourly): price the bid off the live book
+          try { const live = await withLiveQuote(m); const v2 = evaluate(live, S.lastCond[product]).find(x => x.side === v.side); const mq2 = makerQuote(v2);
+            if (!mq2 || mq2.edge < CFG.MAKER_EDGE + laneBar(lk)) continue; ({ q } = mq2); v = v2; m = live; } catch (e) { continue; }
+        }
         const oc = (a.exposure ?? openCost()) + restingCost(), equity = a.cash + oc, room = CFG.MAX_OPEN_PCT * equity - oc;
         const free = a.cash - restingCost() - Math.max(resv(a), 0.02);
         const budget = Math.min(free, room, stakeFor(v.p, q, equity));
         let n = Math.floor(budget / (q + makerFee(q)) + 1e-9); if (S.led.safe) n = Math.min(n, 1);
         if (n < 1) { w.skip = free < q + 0.02 ? `💸 not enough free cash for a bid at ${cents(q)} (${money(Math.max(0, free))} usable, ${money(resv(a))} kept safe)` : `🔒 ${money(oc)} already in bets/bids (max ${Math.round(CFG.MAX_OPEN_PCT * 100)}%)`; continue; }
         try { await postBid(m, v, q, n, product); used.add(ev); w.skip = null; }
-        catch (e) { log('bid failed', m.ticker, e.message); if (!/post.?only|cross/i.test(e.message)) { S.bidErr = S.bidErr || {}; if (!S.bidErr[ev]) { S.bidErr[ev] = 1; await say(`⚠️ Limit bid failed (${label(m.ticker)}): ${e.message.replace(/^.*?-> /, '').slice(0, 160)}`); } } }
+        catch (e) { log('bid failed', m.ticker, e.message); (S.bidCool = S.bidCool || {})[ev] = Date.now() + 60e3; if (!/post.?only|cross/i.test(e.message)) { S.bidErr = S.bidErr || {}; if (!S.bidErr[ev]) { S.bidErr[ev] = 1; await say(`⚠️ Limit bid failed (${label(m.ticker)}): ${e.message.replace(/^.*?-> /, '').slice(0, 160)}`); } } }
       }
     }
   }
