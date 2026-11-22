@@ -58,6 +58,20 @@ if (!RESTARTED) {
     const m = market('KXDOGE15M', 'doge', 9, 0.3098, -0.17); const o0 = W.orders.length;
     await send('/_fasttick'); await wait(2500);
     ok(W.orders.length === o0, 'benched DOGE 15-min still sits out after restart');
+    console.log('\nLoss stop → safe mode (keeps trading small)');
+    await wait(2500);
+    ok(msgs().some(m => /🛡 Loss stop switched to SAFE MODE: trading again now/.test(m)), 'old hard stop becomes safe mode on upgrade, reported');
+    for (const k of Object.keys(W.markets)) if (!W.markets[k].keep) delete W.markets[k];
+    const o1 = W.orders.length;
+    const good = market('KXBTC15M', 'btc', 9, 59970, -0.17), small = market('KXETH15M', 'eth', 9, 1679.95, -0.10);
+    await send('/_fasttick'); await wait(3500);
+    const mine = W.orders.slice(o1);
+    ok(mine.some(o => o.ticker === good.ticker && Number(o.count) === 1), 'safe mode trades a real edge with 1 contract', mine.map(o => o.ticker + ' x' + o.count).join(','));
+    ok(!mine.some(o => o.ticker === small.ticker), 'safe mode skips always-in (break-even) entries');
+    await send('/status'); await wait(500);
+    ok(/SAFE MODE today/.test(last()), '/status shows safe mode', last());
+    await send('/auto15 on'); await wait(300); await send('/status'); await wait(500);
+    ok(/Auto 15-min: ON ·/.test(last()) && !/SAFE MODE/.test(last()), '/auto15 on returns to normal size', last());
     console.log(`\nRESULT: ${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);
   }
 
@@ -153,7 +167,8 @@ if (!RESTARTED) {
   const pin = W.pinned; let blob = null;
   try { const zi = pin.indexOf('\nZ:'); blob = zi >= 0 ? JSON.parse(zlib.inflateRawSync(Buffer.from(pin.slice(zi + 3), 'base64')).toString()) : JSON.parse(pin.slice(pin.indexOf('{'))); } catch (e) {}
   ok(pin.length <= 4096 && blob && blob.LANES && blob.LANES['DOGE|m15'] && blob.LANES['DOGE|m15'].bench > Date.now(), 'self-learning saved in the pinned message (fits Telegram limit)', pin.length);
-  fs.writeFileSync('/tmp/kbot_coins_pinned.txt', pin);
+  blob.LED.fastOff = true; blob.LED.autoPnl = -3; blob.ALWAYS_IN = 1; // the live situation: yesterday's-style hard stop is on when the new code boots
+  fs.writeFileSync('/tmp/kbot_coins_pinned.txt', '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob));
   const r = require('child_process').spawnSync(process.execPath, [__filename], { env: { ...process.env, COINS_RESTART: '1' }, encoding: 'utf8', timeout: 60e3 });
   process.stdout.write((r.stdout || '').split('\n').filter(l => /✅|❌|Restart/.test(l)).join('\n') + '\n');
   ok(r.status === 0, 'restarted bot passes its checks', (r.stderr || '').slice(-300));

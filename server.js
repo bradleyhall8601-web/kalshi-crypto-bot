@@ -135,6 +135,7 @@ async function loadSettings() {
     if (blob.LRN && typeof blob.LRN === 'object') S.learn = blob.LRN;
     if (blob.LANES && typeof blob.LANES === 'object') S.lanes = blob.LANES;
     if (blob.LED && typeof blob.LED.spent === 'number') S.led = { ...newLed(blob.LED.day), ...blob.LED };
+    if (S.led.fastOff) { S.led.fastOff = false; S.led.safe = true; setTimeout(() => { saveSettings(); say('🛡 Loss stop switched to SAFE MODE: trading again now — 1 contract at a time, only 5¢+ edges, no always-in. Back to normal size at midnight CT.'); }, 3000); }
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
   } catch (e) { log('settings parse error', e.message); }
@@ -550,11 +551,11 @@ function recapReason(w) {
   if (w.traded && w.traded !== true) return `✅ bought ${w.traded.n} ${w.traded.side.toUpperCase()} @ ${cents(w.traded.px)}`;
   if (w.traded === true) return '✅ traded';
   if (w.blocked && !w.best) return `⏸ paused — ${w.blocked}`;
-  if (S.led.fastOff && CFG.AUTO_FAST === 1) return '🛑 daily loss stop on — restarts at midnight CT (/auto15 on to restart now)';
+  if (S.led.fastOff && CFG.AUTO_FAST === 1) return '🛑 auto stopped today — /auto15 on to restart';
   if (!w.best) return '⏭ no tradable price seen';
   const r = (w.best.reasons || []).filter(x => !/^edge .* below/.test(x));
   const edge = `best edge ${w.best.edge >= 0 ? '+' : ''}${(w.best.edge * 100).toFixed(1)}¢ (needs ${(CFG.AUTO_EDGE * 100).toFixed(0)}¢)`;
-  return r.length ? `⏭ ${r[0].replace(/ — market likely knows something/, '')}` : `⏭ no edge — ${edge}`;
+  return r.length ? `⏭ ${r[0].replace(/ — market likely knows something/, '')}` : `⏭ no edge — ${edge}${S.led.safe ? ' · 🛡 safe mode' : ''}`;
 }
 async function windowRecap() {
   const done = Object.entries(S.win).filter(([, w]) => Date.now() > w.close + 15e3);
@@ -645,7 +646,7 @@ async function scan(fast) {
   }
   for (const [k, v] of Object.entries(S.sc.ev)) if (v < Date.now() - 60e3) delete S.sc.ev[k];
   // always-in: every open window without a qualifying trade gets its better side, if not negative after fees
-  if (CFG.ALWAYS_IN === 1) {
+  if (CFG.ALWAYS_IN === 1 && !S.led.safe) {
     const have = new Set(cands.map(c => c.m.event_ticker));
     for (const [ev, w] of Object.entries(S.win)) {
       const v = w.bestV; if (!v || have.has(ev) || w.traded || isFast(w.series) !== !!fast || Date.now() - v.at > 30e3) continue;
@@ -668,6 +669,7 @@ async function scan(fast) {
     const auto = S.unlocked || autoFast || autoHour;
     if (!auto && S.led.fastOff) continue; // loss stop hit: stay quiet until tomorrow (no tap alerts either)
     const bar = laneBar(laneOf(c.m.event_ticker, c.m.close_time));
+    if (S.led.safe && c.always) continue; // safe mode: only real edges
     let limit = null;
     if ((autoFast || autoHour) && !S.unlocked) {
       if (!c.m._live) { // hourly list prices can lag: re-price from the live book before trading
@@ -691,6 +693,7 @@ async function scan(fast) {
     const budget = Math.min(a.tradeCap, remaining, a.cash - Math.max(CFG.RESERVE, 0.02), fastLeft, auto ? Math.max(room, 0) : Infinity, c.always ? Math.max(0.5, a.cash * CFG.ALWAYS_PCT) : Infinity);
     let count = Math.floor(budget / worst);
     while (count > 0 && count * worst + feeTotal(count, worst) > budget) count--;
+    if (S.led.safe && count > 1) count = 1; // safe mode after a losing day: smallest possible bets
     if (auto) { const depth = bookDepth(c.m, c.side, worst); if (depth < count) count = Math.floor(depth); if (count < 1 && c.m._book) { log('no liquidity', c.m.ticker, c.side, worst); continue; } }
     if (env.BOT_DEBUG === '1') log('SIZE', c.m.ticker, JSON.stringify({ cap: a.tradeCap, remaining, cash: a.cash, worst, count }));
     if (count < 1) { if (a.cash - CFG.RESERVE < worst + 0.02 && Date.now() - (S.lowCashWarned || 0) > 30 * 60e3) { S.lowCashWarned = Date.now(); await say(`💸 Wallet low: ${money(a.cash)} (keeping ${money(CFG.RESERVE)} safe). Trading paused until funds are added on Kalshi — or /set reserve 0.`); } continue; }
@@ -952,7 +955,7 @@ async function onUpdate(u) {
   if (t.startsWith('/report')) { try { await account(true); } catch (e) {} await rollDay(String(startOfTodayCT())); return say(dayReport(S.led, 'TODAY SO FAR')); }
   if (t.startsWith('/why')) {
     const st = S.stats, f5 = st.fast.filter(x => Date.now() - x < 5 * 60e3).length;
-    const lines = [`🔍 Live check — 15-min scans in last 5 min: ${f5} ${f5 >= 25 ? '✅' : '⚠️'} (target 30) · auto 15-min ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED today' : 'ON'}`];
+    const lines = [`🔍 Live check — 15-min scans in last 5 min: ${f5} ${f5 >= 25 ? '✅' : '⚠️'} (target 30) · auto 15-min ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED today' : S.led.safe ? 'ON · 🛡 SAFE MODE (1 contract, 5¢+ edges)' : 'ON'}`];
     for (const ser of CFG.SERIES.filter(isFast)) {
       const x = st.last15[ser], coin = ser.replace('KX', '').replace('15M', '');
       if (!x) { lines.push(`\n${coin}: no open 15-min market seen yet`); continue; }
@@ -965,7 +968,7 @@ async function onUpdate(u) {
   }
   if (t.startsWith('/auto15')) {
     const on = !/off|0|stop/.test(t);
-    CFG.AUTO_FAST = on ? 1 : 0; if (on) { S.led.fastOff = false; S.led.streak = 0; } await saveSettings();
+    CFG.AUTO_FAST = on ? 1 : 0; if (on) { S.led.fastOff = false; S.led.safe = false; S.led.streak = 0; S.led.autoPnl = 0; } await saveSettings();
     return say(on ? `🤖 Auto 15-min trading ON: up to ${money(CFG.SMALL_TRADE)}/trade, ${money(CFG.FAST_DAY)}/day, stops after ${money(CFG.FAST_MAX_LOSS)} loss or ${CFG.FAST_STREAK} losses in a row.` : '⏸ Auto 15-min trading OFF. 15-min ideas come as tap alerts.');
   }
   if (t.startsWith('/scan')) { await say('🔎 Scanning now…'); await tick(false, true); return say(S.lastError ? '⚠️ ' + S.lastError : '✅ Scan done. No alert = no good trade right now.'); }
@@ -987,7 +990,7 @@ async function onUpdate(u) {
   }
   try {
     const a = await account();
-    return say(`📊 Status\nMode: ${S.paused ? 'PAUSED' : S.unlocked ? 'AUTO' : 'CONFIRM (you tap to buy)'}\nAuto 15-min: ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today (loss limit)' : 'ON'} · today ${money(S.led.fast || 0)}/${CFG.FAST_DAY > 0 ? money(CFG.FAST_DAY) : 'no limit'} · result ${(S.led.autoPnl || 0) >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\nAuto hourly: ${CFG.AUTO_HOURLY !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : 'ON'} · always-in ${CFG.ALWAYS_IN === 1 ? 'ON' : 'OFF'} · 🛡 reserve ${money(CFG.RESERVE)} · max ${Math.round(CFG.TRADE_PCT * 100)}% of wallet/trade\nCash: ${money(a.cash)}\nProfit since start: ${money(a.profit)} (auto at ${money(CFG.UNLOCK_PROFIT)})\nToday: ${money(a.spent)} of ${money(a.dayCap)} · max ${money(a.tradeCap)}/trade\nLast scan: ${S.lastScan ? timeCT(S.lastScan) : 'not yet'}${S.lastError ? '\nLast error: ' + S.lastError : ''}\n\n/help for all commands`);
+    return say(`📊 Status\nMode: ${S.paused ? 'PAUSED' : S.unlocked ? 'AUTO' : 'CONFIRM (you tap to buy)'}\nAuto 15-min: ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : S.led.safe ? 'ON · 🛡 SAFE MODE today (1 contract, 5¢+ edges)' : 'ON'} · today ${money(S.led.fast || 0)}/${CFG.FAST_DAY > 0 ? money(CFG.FAST_DAY) : 'no limit'} · result ${(S.led.autoPnl || 0) >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\nAuto hourly: ${CFG.AUTO_HOURLY !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : S.led.safe ? 'ON · 🛡 SAFE MODE' : 'ON'} · always-in ${CFG.ALWAYS_IN === 1 ? 'ON' : 'OFF'} · 🛡 reserve ${money(CFG.RESERVE)} · max ${Math.round(CFG.TRADE_PCT * 100)}% of wallet/trade\nCash: ${money(a.cash)}\nProfit since start: ${money(a.profit)} (auto at ${money(CFG.UNLOCK_PROFIT)})\nToday: ${money(a.spent)} of ${money(a.dayCap)} · max ${money(a.tradeCap)}/trade\nLast scan: ${S.lastScan ? timeCT(S.lastScan) : 'not yet'}${S.lastError ? '\nLast error: ' + S.lastError : ''}\n\n/help for all commands`);
   } catch (e) { return say('⚠️ Can\'t reach Kalshi: ' + e.message.slice(0, 200)); }
 }
 
@@ -1114,9 +1117,9 @@ async function gradeAutoTrades() {
     S.led.streak = win ? 0 : (S.led.streak || 0) + 1;
     await learnLane(laneOf(o.t.split('-').slice(0, -1).join('-'), new Date(o.c).toISOString()), o.pnl, o.cost);
     const maxLoss = CFG.FAST_MAX_LOSS > 0 ? CFG.FAST_MAX_LOSS : Math.max(1, 0.4 * (S.led.startCash || 5));
-    if (!S.led.fastOff && (S.led.autoPnl <= -maxLoss || S.led.streak >= CFG.FAST_STREAK)) {
-      S.led.fastOff = true;
-      await say(`🛑 Auto trading stopped for today (protecting your wallet): ${S.led.streak >= CFG.FAST_STREAK ? `${S.led.streak} losses in a row` : `down ${money(-S.led.autoPnl)}`}. It restarts tomorrow (or send /auto15 on).`);
+    if (!S.led.safe && !S.led.fastOff && (S.led.autoPnl <= -maxLoss || S.led.streak >= CFG.FAST_STREAK)) {
+      S.led.safe = true; // keep trading, but small: 1 contract at a time, real 5¢+ edges only, no always-in
+      await say(`🛡 SAFE MODE for the rest of today (protecting your wallet): ${S.led.streak >= CFG.FAST_STREAK ? `${S.led.streak} losses in a row` : `down ${money(-S.led.autoPnl)}`}.\nStill trading — 1 contract at a time, only ${Math.round(CFG.AUTO_EDGE * 100)}¢+ edges. Back to normal size at midnight CT (or send /auto15 on).`);
     }
   }
   if (changed) await saveSettings();

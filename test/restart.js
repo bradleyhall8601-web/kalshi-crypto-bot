@@ -44,11 +44,11 @@ W.settlements = [
   ok(/Settled: 1/.test(last()) && /actual: 100%/.test(last()) && /Paper profit: \+\$0\.48/.test(last()), 'scorecard graded the settled alert', last());
   ok(msgs().some(m => /🏆 WIN \+\$15\.78 · BTC hourly ≥ \$60,000\.00 → YES/.test(m)), 'new settlement reported with profit');
   ok(!msgs().some(m => /KXBTCD-ANCIENT/.test(m)), 'old settlements not replayed after restart');
-  ok(msgs().some(m => /🛑 Auto trading stopped for today \(protecting your wallet\): (\d losses in a row|down \$\d)/.test(m)), 'auto circuit breaker trips (loss limit / losing streak)', msgs().filter(m => /stopped/.test(m)).join(' | '));
+  ok(msgs().some(m => /🛡 SAFE MODE for the rest of today \(protecting your wallet\): (\d losses in a row|down \$\d)[\s\S]*Still trading — 1 contract at a time/.test(m)), 'losing day switches to safe mode (keeps trading small)', msgs().filter(m => /SAFE|stopped/.test(m)).join(' | '));
   await send('/status'); await wait(500);
-  ok(/Auto 15-min: STOPPED for today/.test(last()) && /result −\$6\.00/.test(last()), '/status shows stopped + day result', last());
+  ok(/Auto 15-min: ON · 🛡 SAFE MODE today/.test(last()) && /result −\$6\.00/.test(last()), '/status shows safe mode + day result', last());
   const blob = JSON.parse(W.pinned.slice(W.pinned.indexOf('{')));
-  ok(blob.SC.n === 1 && blob.SC.open.length === 0 && blob.manualLock === true && blob.LED.fastOff === true, 'scorecard, lock and auto stop saved to pinned');
+  ok(blob.SC.n === 1 && blob.SC.open.length === 0 && blob.manualLock === true && blob.LED.safe === true, 'scorecard, lock and safe mode saved to pinned');
   ok(msgs().some(m => /📝 Alert check · BTC hourly ≥ \$60,000\.00 YES @ 50¢ → ✅ right/.test(m)), 'graded alert reported');
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
