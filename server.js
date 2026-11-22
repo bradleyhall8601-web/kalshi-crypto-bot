@@ -200,7 +200,8 @@ async function tg(method, payload) {
   try { return await req(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, { method: 'POST', body: payload }); }
   catch (e) { if (!/not modified/.test(e.message)) log('telegram error', e.message); return { ok: false, error: e.message }; }
 }
-const say = (text, extra = {}) => OWNER ? tg('sendMessage', { chat_id: OWNER, text, ...extra }) : null;
+// every Telegram report is also written to the server log (one line), so a log review sees exactly what Brad saw
+const say = (text, extra = {}) => { if (!OWNER) return null; log('TG', String(text).replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 600)); return tg('sendMessage', { chat_id: OWNER, text, ...extra }); };
 const num = v => (v === undefined || v === null || v === '') ? NaN : Number(v);
 const d = (o, k) => {
   const a = num(o[k + '_dollars']); if (a === a) return a;
@@ -694,7 +695,7 @@ async function scan(fast) {
     let count = Math.floor(budget / worst);
     while (count > 0 && count * worst + feeTotal(count, worst) > budget) count--;
     if (S.led.safe && count > 1) count = 1; // safe mode after a losing day: smallest possible bets
-    if (auto) { const depth = bookDepth(c.m, c.side, worst); if (depth < count) count = Math.floor(depth); if (count < 1 && c.m._book) { log('no liquidity', c.m.ticker, c.side, worst); continue; } }
+    if (auto) { const depth = bookDepth(c.m, c.side, worst); if (depth < count) count = Math.floor(depth); if (count < 1 && c.m._book) { S.nlq = S.nlq || {}; if (!S.nlq[c.m.ticker]) { S.nlq[c.m.ticker] = 1; log('no liquidity', c.m.ticker, c.side, worst); } continue; } }
     if (env.BOT_DEBUG === '1') log('SIZE', c.m.ticker, JSON.stringify({ cap: a.tradeCap, remaining, cash: a.cash, worst, count }));
     if (count < 1) { if (a.cash - CFG.RESERVE < worst + 0.02 && Date.now() - (S.lowCashWarned || 0) > 30 * 60e3) { S.lowCashWarned = Date.now(); await say(`💸 Wallet low: ${money(a.cash)} (keeping ${money(CFG.RESERVE)} safe). Trading paused until funds are added on Kalshi — or /set reserve 0.`); } continue; }
     S.sc.open.push({ t: c.m.ticker, s: c.side[0], p: Math.round(c.p * 1000) / 1000, a: c.ask, c: Date.parse(c.m.close_time) }); if (S.sc.open.length > 25) S.sc.open.shift();
@@ -1166,7 +1167,9 @@ if (env.BOT_TEST !== '1') { // tests drive scans manually
     if (Date.now() - last > 120e3 && Date.now() - S.bootAt > 180e3) { log('WATCHDOG stall — restarting'); say('♻️ Bot stalled for 2 min — restarting itself now.').finally(() => setTimeout(() => process.exit(1), 1500)); }
   }, 30e3);
   setInterval(() => { // heartbeat: proves scanning is continuous
-    const st = S.stats; log('HEARTBEAT', JSON.stringify({ fast5m: st.fast.filter(t => Date.now() - t < 5 * 60e3).length, slow5m: st.slow.filter(t => Date.now() - t < 5 * 60e3).length, skipped: st.skipped, lastError: S.lastError }));
+    const st = S.stats; log('HEARTBEAT', JSON.stringify({ fast5m: st.fast.filter(t => Date.now() - t < 5 * 60e3).length, slow5m: st.slow.filter(t => Date.now() - t < 5 * 60e3).length, skipped: st.skipped, lastError: S.lastError,
+      cash: acctCache ? acctCache.v.cash : null, open: acctCache ? acctCache.v.exposure : null, day: { w: S.led.w, l: S.led.l, pnl: S.led.pnl, auto: S.led.autoPnl, trades: S.led.n }, safe: !!S.led.safe,
+      lanes: Object.fromEntries(Object.entries(S.lanes || {}).filter(([, L]) => (L.r || []).length).map(([k, L]) => [k, `${L.r.filter(x => x > 0).length}-${L.r.filter(x => x <= 0).length}${L.bar ? ' +' + Math.round(L.bar * 100) + 'c' : ''}${Date.now() < (L.bench || 0) ? ' BENCH' : ''}`])) }));
     if (CFG.AUTO_FAST === 1 && !S.paused && st.fast.filter(t => Date.now() - t < 5 * 60e3).length < 10 && Date.now() - (S.lastStallAlert || 0) > 30 * 60e3) { S.lastStallAlert = Date.now(); say('⚠️ 15-min scanning is falling behind (fewer than 10 checks in 5 min). Investigating automatically; last error: ' + (S.lastError || 'none')); }
   }, 5 * 60e3);
 }
