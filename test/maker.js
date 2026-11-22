@@ -82,6 +82,20 @@ W.shards = { 0: 20, 2: 0 };
   const mine = W.orders.slice(o7).filter(o => o.ticker === m5.ticker);
   ok(mine.length >= 1 && mine.every(o => o.time_in_force === 'immediate_or_cancel'), 'taker buy for a large edge, no extra bid', mine.map(o => o.time_in_force).join(','));
 
+  console.log('\n7b. Coins move together: max 2 same-direction bets per closing time');
+  clear(); await send('/set samedir 2'); await wait(200);
+  const close = 9; const before = W.orders.length;
+  const cs = [['KXBTC15M', 'btc', 59990], ['KXETH15M', 'eth', 1679.9]].map(([s, c, k]) => market(s, c, close, k, -0.08)); cs[1].close_time = cs[0].close_time;
+  await send('/_fasttick'); await wait(3000);
+  const after1 = W.orders.slice(before).filter(o => cs.some(m => m.ticker === o.ticker)).length;
+  // a third coin, same direction, same closing time
+  const m3b = market('KXBTC15M', 'btc', close, 59991, -0.08); // another window, same direction, same closing time
+  delete W.markets[m3b.ticker]; m3b.event_ticker = 'KXBTC15M-SAMEDIR'; m3b.ticker = 'KXBTC15M-SAMEDIR-T59991'; m3b.close_time = cs[0].close_time; W.markets[m3b.ticker] = m3b;
+  await send('/_fasttick'); await wait(3000);
+  ok(after1 === 2 && !W.orders.some(o => o.ticker === m3b.ticker), 'third DOWN bet at the same closing time is skipped', after1 + ' / ' + W.orders.slice(before).map(o => o.ticker).join(','));
+  await send('/set samedir 50'); await wait(200);
+  for (const o of Object.values(W.resting)) o.remaining = 0;
+
   console.log('\n8. Small account: reserve scales down so it can still trade');
   clear(); await wait(21000); // account cache
   W.shards = { 0: 1.33, 2: 0 }; W.positions = [];

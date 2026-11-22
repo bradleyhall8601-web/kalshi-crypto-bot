@@ -61,6 +61,7 @@ const CFG = {
   MAKER_EDGE: 0.02,  // a resting bid needs this much calibrated edge after the maker fee
   MAKER_TTL_MIN: 5,  // re-check / re-post a resting bid at least this often
   KELLY: env.BOT_TEST === '1' ? 0 : 0.5,
+  MAX_SAME_DIR: env.BOT_TEST === '1' ? 50 : 2, // coins move together: at most 2 bets on the same direction (up/down) per closing time
   RESERVE_SCALE: env.BOT_TEST === '1' ? 0 : 1, // reserve = the smaller of $RESERVE and 10% of the account (min 25¢), so a small account can still trade // size by half-Kelly on the calibrated edge (capped by tradepct)            // self-calibration: shrink the model toward the market by how much its past disagreements came true          // self-learning: each market type (coin x 15-min/hourly/daily) tightens or benches itself from its own real results
   MAX_ALERTS_PER_RUN: 2, ALERT_TTL_MIN: 4, MAX_SLIPPAGE: 0.02,
   SCAN_EVERY_MIN: 1, TZ: 'America/Chicago',
@@ -100,6 +101,7 @@ const SETTINGS = {
   maxopen:  { key: 'MAX_OPEN_PCT', desc: 'max share of money in open positions (0.6 = 60%)', min: 0.1, max: 1 },
   maker:    { key: 'MAKER', desc: 'limit bids instead of paying the ask (1 = on, 0 = off)', min: 0, max: 1 },
   makeredge:{ key: 'MAKER_EDGE', desc: 'edge needed for a limit bid (0.02 = 2¢)', min: 0, max: 0.2 },
+  samedir:  { key: 'MAX_SAME_DIR', desc: 'max bets on the same direction (up/down) closing at the same time, across coins', min: 1, max: 50 },
   reservescale: { key: 'RESERVE_SCALE', desc: 'reserve shrinks with a small account (1 = on: min of $reserve and 10%)', min: 0, max: 1 },
   kelly:    { key: 'KELLY', desc: 'bet size as a share of the Kelly amount (0.5 = half; 0 = off)', min: 0, max: 1 },
   calib:    { key: 'CAL', desc: 'self-calibration from real results (1 = on, 0 = off)', min: 0, max: 1 },
@@ -642,6 +644,12 @@ function stakeFor(p, q, equity) {
   const f = Math.max(0, (p - q) / (1 - q)) * CFG.KELLY;
   return Math.max(Math.min(cap, equity * f), q + 0.02); // at least one contract when the edge is real
 }
+// up/down exposure per closing time across ALL coins (all our markets are "above strike": YES = up)
+function sameDirCount(close, side) {
+  const r = Object.values(S.rest || {}).filter(o => Math.abs(o.close - close) < 1500 && o.side === side).length;
+  const f = (S.led.auto || []).filter(x => !x.done && Math.abs(x.c - close) < 1500 && x.s === side[0] && !(x.oid && S.rest[x.oid])).length;
+  return r + f;
+}
 const restingCost = () => Object.values(S.rest || {}).reduce((a, o) => a + Math.max(0, o.n - (o.filled || 0)) * (o.q + makerFee(o.q)), 0);
 const restingFor = ev => Object.values(S.rest || {}).find(o => o.ev === ev);
 async function postBid(m, v, q, n, product) {
@@ -805,6 +813,7 @@ async function scan(fast) {
   for (const c of cands) {
     if (sent >= CFG.MAX_ALERTS_PER_RUN) break;
     if (used.has(c.m.event_ticker) || restingFor(c.m.event_ticker)) continue;
+    if (sameDirCount(Date.parse(c.m.close_time), c.side) >= CFG.MAX_SAME_DIR) { const W2 = S.win[c.m.event_ticker]; if (W2 && !W2.traded) W2.skip = `🔗 already ${CFG.MAX_SAME_DIR} ${c.side === 'yes' ? 'UP' : 'DOWN'} bets closing then (coins move together)`; continue; }
     const fastSeries = isFast(c.m.event_ticker.split('-')[0]);
     const autoFast = fastSeries && CFG.AUTO_FAST === 1 && !S.led.fastOff;
     const autoHour = !fastSeries && CFG.AUTO_HOURLY === 1 && !S.led.fastOff;
@@ -908,10 +917,12 @@ async function scan(fast) {
         if (restingFor(ev) || a.held.has(ev) || used.has(ev)) continue;
         const lk = laneOf(ev, w.mk.m.close_time); if (laneBenched(lk) || w.mk.edge < CFG.MAKER_EDGE + laneBar(lk)) continue;
         if ((S.bidCool || {})[ev] > Date.now()) continue;
+        if (env.BOT_DEBUG_BIDS === '1') log('MKTRY', ev, sameDirCount(Date.parse(w.mk.m.close_time), w.mk.v.side), JSON.stringify((S.led.auto || []).filter(x => !x.done).map(x => [x.t, x.s, x.c - Date.parse(w.mk.m.close_time)])));
+        if (sameDirCount(Date.parse(w.mk.m.close_time), w.mk.v.side) >= CFG.MAX_SAME_DIR) { w.skip = `🔗 already ${CFG.MAX_SAME_DIR} ${w.mk.v.side === 'yes' ? 'UP' : 'DOWN'} bets closing then (coins move together)`; continue; }
         let { q, v, m, product } = w.mk;
         if (!m._live) { // list prices can lag (hourly): price the bid off the live book
           try { const live = await withLiveQuote(m); const v2 = evaluate(live, S.lastCond[product]).find(x => x.side === v.side); const mq2 = makerQuote(v2);
-            if (!mq2 || mq2.edge < CFG.MAKER_EDGE + laneBar(lk)) continue; ({ q } = mq2); v = v2; m = live; } catch (e) { continue; }
+            if (!mq2 || mq2.edge < CFG.MAKER_EDGE + laneBar(lk)) { if (env.BOT_DEBUG_BIDS === '1') log('MKSKIP live', ev, JSON.stringify(v2 && { p: v2.p, ask: v2.ask, sp: v2.spread, r: v2.reasons })); continue; } ({ q } = mq2); v = v2; m = live; } catch (e) { if (env.BOT_DEBUG_BIDS === '1') log('MKSKIP err', ev, e.message); continue; }
         }
         const oc = (a.exposure ?? openCost()) + restingCost(), equity = a.cash + oc, room = CFG.MAX_OPEN_PCT * equity - oc;
         const free = a.cash - restingCost() - Math.max(resv(a), 0.02);
