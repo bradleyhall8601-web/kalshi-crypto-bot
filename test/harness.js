@@ -6,7 +6,7 @@ const W = global.W = {
   now: () => Date.now(),
   shards: { 0: 7.44, 2: 0.32 },
   markets: {},          // ticker -> market
-  fills: [], settlements: [], positions: [],
+  fills: [], settlements: [], positions: [], resting: {}, cancels: [],
   orders: [], transfers: [], tg: [],
   btc: 60000, eth: 1680, sol: 140, xrp: 2.1, doge: 0.31, bnb: 610, hype: 38, near: 5.2, zec: 52, vol: 0.0005, // per-minute vol used to generate candles
   candleLag: 30,        // seconds since newest candle start
@@ -96,7 +96,10 @@ global.fetch = async (url, o = {}) => {
       return J({ balance: Math.round(total * 100), balance_dollars: total.toFixed(4), portfolio_value: 0, balance_breakdown: Object.entries(W.shards).map(([k, v]) => ({ exchange_index: Number(k), balance: v.toFixed(4) })) });
     }
     if (path.endsWith('/portfolio/settlements')) return J({ settlements: W.settlements, cursor: '' });
-    if (path.endsWith('/portfolio/fills')) return J({ fills: W.fills, cursor: '' });
+    if (path.endsWith('/portfolio/fills')) { const oid = new URL(u).searchParams.get('order_id'); return J({ fills: oid ? W.fills.filter(f => f.order_id === oid) : W.fills, cursor: '' }); }
+    const cx = path.match(/\/portfolio\/events\/orders\/([^/?]+)$/);
+    if (cx && o.method === "DELETE") { const r = W.resting[cx[1]]; if (!r || r.remaining <= 0) return J({ error: { code: 'not_found' } }, 404); const red = r.remaining; r.remaining = 0; W.cancels.push(cx[1]);
+      W.shards[r.idx] = (W.shards[r.idx] || 0) + red * r.pay; return J({ order_id: cx[1], reduced_by: red.toFixed(2), ts_ms: Date.now() }); }
     if (path.endsWith('/portfolio/positions')) return J({ market_positions: W.positions.filter(p => W.markets[p.ticker] && W.markets[p.ticker].status !== 'settled') }); // settled positions drop off, like Kalshi
     if (path.endsWith('/intra_exchange_instance_transfer')) {
       if (W.transferFails) return J({ error: { code: 'forbidden', message: 'missing scope write::transfer' } }, 403);
@@ -112,6 +115,16 @@ global.fetch = async (url, o = {}) => {
       const costPer = b.side === 'bid' ? yesPx : 1 - yesPx;
       const idx = b.exchange_index ?? 0;
       W.orders.push(b);
+      if (b.time_in_force === 'good_till_canceled') { // resting limit order (maker)
+        const askYes = Number(m.yes_ask_dollars), bidYes = Number(m.yes_bid_dollars);
+        const crosses = b.side === 'bid' ? yesPx >= askYes - 1e-9 : yesPx <= bidYes + 1e-9;
+        if (b.post_only && crosses) return J({ error: { code: 'post_only_cross', message: 'post only order would cross' } }, 400);
+        if (!b.expiration_time || b.expiration_time * 1000 <= Date.now()) return J({ error: { code: 'invalid_expiration' } }, 400);
+        if ((W.shards[idx] || 0) < count * costPer) return J({ error: { code: 'insufficient_balance', message: 'insufficient balance' } }, 400);
+        const id = 'r' + W.orders.length; W.shards[idx] -= count * costPer; // Kalshi holds the collateral
+        W.resting[id] = { id, b, remaining: count, pay: costPer, idx, ticker: b.ticker };
+        return J({ order_id: id, fill_count: '0.00', remaining_count: count.toFixed(2), ts_ms: Date.now() }, 201);
+      }
       // fills at the current ask (or better) if the limit allows
       const askYes = Number(m.yes_ask_dollars), askNo = Number(m.no_ask_dollars);
       const can = b.side === 'bid' ? askYes <= yesPx : (1 - askNo) >= yesPx - 1e-9;
@@ -163,4 +176,10 @@ function start(env) {
     realFetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', body: JSON.stringify(update), headers });
   return { post, port, HOOK, SECRET };
 }
+// a seller hits our resting bid
+W.fillResting = (id, n) => { const r = W.resting[id]; if (!r || r.remaining < n) throw new Error('cannot fill ' + id); r.remaining -= n;
+  const fee = Math.ceil(0.0175 * n * r.pay * (1 - r.pay) * 100) / 100; W.shards[r.idx] -= fee;
+  const yes = r.b.side === 'bid' ? r.pay : 1 - r.pay;
+  W.fills.push({ order_id: id, ticker: r.ticker, side: r.b.side === 'bid' ? 'yes' : 'no', action: r.b.side === 'bid' ? 'buy' : 'sell', count_fp: n.toFixed(2), yes_price_dollars: yes.toFixed(4), no_price_dollars: (1 - yes).toFixed(4), fee_cost: fee.toFixed(4), is_taker: false });
+  W.positions.push({ ticker: r.ticker, position: r.b.side === 'bid' ? n : -n, market_exposure_dollars: (n * r.pay).toFixed(4) }); };
 module.exports = { W, start };

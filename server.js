@@ -56,7 +56,12 @@ const CFG = {
   DAILY_MIN_EQUITY: 20, // ...but only once the account has $20+ (a daily bet locks money for up to a day; small wallets need 15-min turnover)
   MAX_OPEN_PCT: 0.60, // never have more than 60% of the money tied up in open positions at once
   LEARN: 1,
-  CAL: 1,            // self-calibration: shrink the model toward the market by how much its past disagreements came true          // self-learning: each market type (coin x 15-min/hourly/daily) tightens or benches itself from its own real results
+  CAL: 1,
+  MAKER: env.BOT_TEST === '1' ? 0 : 1, // post limit bids (pay the bid, ~¼ fee) instead of paying the ask
+  MAKER_EDGE: 0.02,  // a resting bid needs this much calibrated edge after the maker fee
+  MAKER_TTL_MIN: 5,  // re-check / re-post a resting bid at least this often
+  KELLY: env.BOT_TEST === '1' ? 0 : 0.5,
+  RESERVE_SCALE: env.BOT_TEST === '1' ? 0 : 1, // reserve = the smaller of $RESERVE and 10% of the account (min 25¢), so a small account can still trade // size by half-Kelly on the calibrated edge (capped by tradepct)            // self-calibration: shrink the model toward the market by how much its past disagreements came true          // self-learning: each market type (coin x 15-min/hourly/daily) tightens or benches itself from its own real results
   MAX_ALERTS_PER_RUN: 2, ALERT_TTL_MIN: 4, MAX_SLIPPAGE: 0.02,
   SCAN_EVERY_MIN: 1, TZ: 'America/Chicago',
 };
@@ -93,6 +98,10 @@ const SETTINGS = {
   dailymin: { key: 'DAILY_MIN_EQUITY', desc: 'only trade daily markets with at least this much money ($)', min: 0, max: 100000 },
   daily:    { key: 'DAILY', desc: 'trade daily 5 PM ET markets (1 = on, 0 = off)', min: 0, max: 1 },
   maxopen:  { key: 'MAX_OPEN_PCT', desc: 'max share of money in open positions (0.6 = 60%)', min: 0.1, max: 1 },
+  maker:    { key: 'MAKER', desc: 'limit bids instead of paying the ask (1 = on, 0 = off)', min: 0, max: 1 },
+  makeredge:{ key: 'MAKER_EDGE', desc: 'edge needed for a limit bid (0.02 = 2¢)', min: 0, max: 0.2 },
+  reservescale: { key: 'RESERVE_SCALE', desc: 'reserve shrinks with a small account (1 = on: min of $reserve and 10%)', min: 0, max: 1 },
+  kelly:    { key: 'KELLY', desc: 'bet size as a share of the Kelly amount (0.5 = half; 0 = off)', min: 0, max: 1 },
   calib:    { key: 'CAL', desc: 'self-calibration from real results (1 = on, 0 = off)', min: 0, max: 1 },
   learn:    { key: 'LEARN', desc: 'self-learning from real results (1 = on, 0 = off)', min: 0, max: 1 },
   fastloss: { key: 'FAST_MAX_LOSS', desc: 'stop auto for the day after losing $ (0 = 40% of start-of-day wallet)', min: 0, max: 10000 },
@@ -107,7 +116,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 9; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 10; blob.REST = S.rest; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -126,6 +135,8 @@ async function loadSettings() {
     const blob = zi >= 0 ? JSON.parse(zlib.inflateRawSync(Buffer.from(pm.text.slice(zi + 3).trim(), 'base64')).toString()) : JSON.parse(pm.text.slice(pm.text.indexOf('{')));
     for (const x of Object.values(SETTINGS)) if (typeof blob[x.key] === 'number') CFG[x.key] = blob[x.key];
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
+    if (!(blob.v >= 10) && env.BOT_TEST !== '1') { CFG.TRADE_PCT = 0.06; CFG.DAILY_MIN_EQUITY = 50; CFG.MAKER = 1; CFG.KELLY = 0.5; setTimeout(saveSettings, 2000); } // grow-and-last sizing + limit bids
+    if (blob.REST && typeof blob.REST === 'object') S.rest = blob.REST;
     if (!(blob.v >= 9)) { for (const x of Object.values(HOURLY_ALT)) if (!CFG.SERIES.includes(x) && CFG.SERIES.some(y => coinOf(y) === coinOf(x))) CFG.SERIES.push(x); setTimeout(saveSettings, 2000); } // NEAR/ZEC hourly live under KX..H
     if (!(blob.v >= 8)) { for (const x of ALL_SERIES) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); CFG.FAST_STREAK = Math.max(CFG.FAST_STREAK || 0, 8); CFG.DAILY = 1; CFG.MAX_OPEN_PCT = 0.6; CFG.LEARN = 1; setTimeout(saveSettings, 2000); } // all coins + daily + self-learning
     if (!(blob.v >= 7)) { CFG.ALWAYS_IN = 1; CFG.ALWAYS_EDGE = 0; CFG.ALWAYS_PCT = 0.10; setTimeout(saveSettings, 2000); }
@@ -175,7 +186,7 @@ async function rollDay(today) {
   S.led = { ...newLed(today), auto: S.led.auto || [] };
 }
 const S = { bootAt: Date.now(), win: {}, // per market window: best verdict seen, traded or not
-   learn: {}, lanes: {}, newsSeen: new Set(), newsLog: [], newsPauseUntil: 0, newsPauseWhy: '', lastCond: {}, stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+   learn: {}, lanes: {}, rest: {}, newsSeen: new Set(), newsLog: [], newsPauseUntil: 0, newsPauseWhy: '', lastCond: {}, stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
@@ -583,6 +594,7 @@ function recapReason(w) {
   if (w.traded === true) return '✅ traded';
   if (w.blocked && !w.best) return `⏸ paused — ${w.blocked}`;
   if (S.led.fastOff && CFG.AUTO_FAST === 1) return '🛑 auto stopped today — /auto15 on to restart';
+  if (w.bid) return `📋 bid ${w.bid.n} ${w.bid.side.toUpperCase()} @ ${cents(w.bid.q)} — no seller came (no cost)`;
   if (w.skip) return `⏭ ${w.skip}`;
   if (!w.best) return '⏭ no tradable price seen';
   const r = (w.best.reasons || []).filter(x => !/^edge .* below/.test(x));
@@ -607,9 +619,103 @@ const laneBenched = k => CFG.LEARN === 1 && Date.now() < (laneState(k).bench || 
 // money already sitting in open auto positions (not yet settled)
 const openCost = () => (S.led.auto || []).filter(x => !x.done && Date.now() < x.c + 30 * 60e3).reduce((a, x) => a + (x.cost || 0), 0);
 S.emptyUntil = {};
+// ---------- limit bids (maker) ----------
+// Instead of paying the ask (+ the full taker fee), post a bid 1¢ above the best bid, never above
+// calibrated-probability − MAKER_EDGE − maker fee, never touching the ask. Re-checked every scan:
+// cancelled the moment the edge is gone, conditions turn bad, or the window gets close.
+const resv = a => CFG.RESERVE_SCALE === 1 ? Math.min(CFG.RESERVE, Math.max(0.25, 0.1 * (a.cash + (a.exposure || 0)))) : CFG.RESERVE;
+const makerFee = q => Math.ceil(0.0175 * q * (1 - q) * 100) / 100; // Kalshi maker fee where charged (¼ of taker) — assumed on all
+function makerQuote(v) {
+  if (!v || v.reasons.some(r => !/^edge .* below/.test(r) && !/^price .* outside/.test(r))) return null;
+  const bid = Math.max(0, v.ask - v.spread);
+  const cap = Math.floor((v.p - CFG.MAKER_EDGE - 0.0175 * v.p * (1 - v.p)) * 100 + 1e-9) / 100;
+  const q = Math.min(Math.round((bid + 0.01) * 100) / 100, cap, Math.round((v.ask - 0.01) * 100) / 100);
+  if (!(q >= CFG.MIN_PRICE && q <= CFG.MAX_PRICE)) return null;
+  const edge = v.p - q - makerFee(q);
+  return edge >= CFG.MAKER_EDGE - 1e-9 ? { q, edge } : null;
+}
+// half-Kelly stake on the calibrated edge, capped by tradepct of the whole account
+function stakeFor(p, q, equity) {
+  const cap = equity * CFG.TRADE_PCT;
+  if (!(CFG.KELLY > 0)) return cap;
+  const f = Math.max(0, (p - q) / (1 - q)) * CFG.KELLY;
+  return Math.max(Math.min(cap, equity * f), q + 0.02); // at least one contract when the edge is real
+}
+const restingCost = () => Object.values(S.rest || {}).reduce((a, o) => a + Math.max(0, o.n - (o.filled || 0)) * (o.q + makerFee(o.q)), 0);
+const restingFor = ev => Object.values(S.rest || {}).find(o => o.ev === ev);
+async function postBid(m, v, q, n, product) {
+  const idx = Number.isInteger(m.exchange_index) ? m.exchange_index : 0;
+  await ensureShardFunds(idx, n * (q + makerFee(q)) + 0.02);
+  const fast = isFast(m.event_ticker.split('-')[0]), close = Date.parse(m.close_time);
+  const stopAt = close - (fast ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES) * 60e3;
+  const exp = Math.floor(Math.min(stopAt, Date.now() + CFG.MAKER_TTL_MIN * 60e3) / 1000);
+  const body = { ticker: m.ticker, side: v.side === 'yes' ? 'bid' : 'ask', count: n + '.00', price: (v.side === 'yes' ? q : 1 - q).toFixed(4),
+    time_in_force: 'good_till_canceled', expiration_time: exp, post_only: true, self_trade_prevention_type: 'taker_at_cross',
+    client_order_id: 'kbot-' + crypto.randomUUID(), exchange_index: idx };
+  const o = await kalshi('POST', '/portfolio/events/orders', body);
+  log('BID', JSON.stringify(body), '->', JSON.stringify(o));
+  acctCache = null;
+  S.rest[o.order_id] = { id: o.order_id, t: m.ticker, ev: m.event_ticker, side: v.side, n, q, p: Math.round(v.p * 1000) / 1000, pb: Math.round((v.pb ?? v.p) * 1000), mk: Math.round(v.mkt * 1000),
+    placed: Date.now(), exp: exp * 1000, stop: stopAt, close, idx, filled: 0, cost: 0, fees: 0, product, cond: '' };
+  if (num(o.fill_count) > 0) await recordBidFills(S.rest[o.order_id]); // crossed anyway (book moved) — count it
+  await saveSettings().catch(() => {});
+}
+// pull this order's fills from Kalshi and book any new ones (ledger, receipt, scorecard)
+async function recordBidFills(o) {
+  const fills = await pageAll(`/portfolio/fills?order_id=${o.id}`, 'fills');
+  let n = 0, cost = 0, fees = 0;
+  for (const f of fills) { const c = num(f.count_fp ?? f.count); const px = o.side === 'yes' ? num(f.yes_price_dollars) : num(f.no_price_dollars); n += c; cost += c * px; fees += d(f, 'fee_cost') || 0; }
+  if (!(n > (o.filled || 0) + 1e-9)) return false;
+  const dn = n - (o.filled || 0), dCost = cost - (o.cost || 0), dFee = fees - (o.fees || 0), total = dCost + dFee, px = dn > 0 ? dCost / dn : o.q;
+  o.filled = n; o.cost = cost; o.fees = fees;
+  await rollDay(String(startOfTodayCT()));
+  S.led.spent += total; S.led.n++; S.led.nAuto++; S.led.fees += dFee;
+  if (isFast(o.ev.split('-')[0])) S.led.fast = (S.led.fast || 0) + total;
+  const prev = S.led.auto.find(x => x.oid === o.id);
+  if (prev) { prev.n += dn; prev.cost = Math.round((prev.cost + total) * 100) / 100; }
+  else { S.led.auto.push({ t: o.t, s: o.side[0], n: dn, cost: Math.round(total * 100) / 100, c: o.close, oid: o.id }); if (S.led.auto.length > 30) S.led.auto.shift(); }
+  if (!S.sc.open.some(x => x.t === o.t)) { S.sc.open.push({ t: o.t, s: o.side[0], p: o.p, pb: o.pb, mk: o.mk, a: o.q, c: o.close }); if (S.sc.open.length > 25) S.sc.open.shift(); }
+  if (S.win[o.ev]) S.win[o.ev].traded = { side: o.side, px, n: o.filled };
+  acctCache = null;
+  const fast = isFast(o.ev.split('-')[0]);
+  await say(`🟢🤖 LIMIT BUY FILLED · ${label(o.t)}\n` +
+    `🎟 ${Math.round(dn * 100) / 100} ${o.side.toUpperCase()}${fast ? (o.side === 'yes' ? ' (⬆️ up)' : ' (⬇️ down)') : ''} @ ${cents(px)} = ${money(total)} (fee ${money(dFee)}) · bid, not ask 💡\n` +
+    `🎯 Win chance ${Math.round(o.p * 100)}% · paid ${cents(px)} · edge +${((o.p - px - dFee / Math.max(dn, 1)) * 100).toFixed(1)}¢\n` +
+    `✅ Win pays ${money(dn)} (+${money(dn - total)}) · ❌ lose −${money(total)}`);
+  await saveSettings().catch(() => {});
+  return true;
+}
+async function cancelBid(o, why) {
+  try { const r = await kalshi('DELETE', `/portfolio/events/orders/${o.id}?market_ticker=${encodeURIComponent(o.t)}`); log('CANCEL', o.id, o.t, why, JSON.stringify(r)); }
+  catch (e) { if (!/404|not.?found/i.test(e.message)) { log('cancel failed', o.id, e.message); return false; } }
+  try { await recordBidFills(o); } catch (e) { log('fills check failed', e.message); }
+  if (S.win[o.ev] && !S.win[o.ev].traded) S.win[o.ev].bid = { side: o.side, q: o.q, n: o.n, why };
+  delete S.rest[o.id]; await saveSettings().catch(() => {});
+  return true;
+}
+// every fast scan: book fills, then keep / cancel each resting bid against the latest prices
+async function manageBids(latest, fast) {
+  for (const o of Object.values(S.rest || {}).filter(x => isFast(x.ev.split('-')[0]) === !!fast)) {
+    try {
+      await recordBidFills(o);
+      if ((o.filled || 0) >= o.n - 1e-9) { delete S.rest[o.id]; await saveSettings().catch(() => {}); continue; }
+      const now = Date.now(), v = latest[o.t + '|' + o.side];
+      let why = null;
+      if (now >= o.stop) why = 'window closing';
+      else if (now >= o.exp - 5e3) why = 'time to re-check';
+      else if (S.paused) why = 'bot paused';
+      else if (!v) { if (now - o.placed > 30e3) why = 'market not seen'; }
+      else if (v.reasons.some(r => !/^edge .* below/.test(r) && !/^price .* outside/.test(r))) why = v.reasons.find(r => !/^edge .* below/.test(r) && !/^price .* outside/.test(r)).replace(/ — market likely knows something/, '');
+      else if (v.p - o.q - makerFee(o.q) < CFG.MAKER_EDGE / 2) why = 'edge gone';
+      else if (v.ask - v.spread > o.q + 0.005 && now - o.placed > 20e3) { const mq = makerQuote(v); if (mq && mq.q > o.q) why = 'outbid — re-posting higher'; }
+      if (env.BOT_DEBUG_BIDS === '1') log('BIDCHK', o.id, why, v ? JSON.stringify({ p: v.p, ask: v.ask, sp: v.spread, r: v.reasons }) : 'no v');
+      if (why) await cancelBid(o, why);
+    } catch (e) { log('manage bid failed', o.id, e.message); }
+  }
+}
 async function scan(fast) {
   if (!KEY_ID || !SIGN_KEY || !OWNER) return;
-  if (S.paused) return;
+  if (S.paused) { for (const o of Object.values(S.rest || {})) await cancelBid(o, 'bot paused').catch(() => {}); return; }
   const now = Date.now();
   for (const [k, v] of Object.entries(S.recentAlerts)) if (now - v > 3 * 3600e3) delete S.recentAlerts[k];
   for (const [k, v] of Object.entries(S.pending)) if (now - v.created > 3600e3) delete S.pending[k];
@@ -623,7 +729,7 @@ async function scan(fast) {
   if (!!evp !== !!S.evpOn) { S.evpOn = evp; await say(evp ? `⏸📅 Trading paused — ${evp}. Resumes automatically.` : '▶️ Event pause over — trading resumed.'); }
   const lane = CFG.SERIES.filter(x => isFast(x) === !!fast && !(S.emptyUntil[x] > Date.now()));
   const [cond, lists] = await Promise.all([marketConditions(), Promise.all(lane.map(x => pageAll(`/markets?series_ticker=${x}&status=open`, 'markets').catch(e => { log('markets failed', x, e.message); return null; })))]);
-  const cands = [], freshWin = new Set(); // windows re-priced in THIS scan (always-in only uses this scan's prices)
+  const cands = [], freshWin = new Set(), latest = {}; // windows re-priced in THIS scan (always-in only uses this scan's prices)
   S.lastCond = cond;
   for (const [si, series] of lane.entries()) {
     const product = CFG.SPOT[series]; if (!product || !cond[product]) continue;
@@ -659,7 +765,7 @@ async function scan(fast) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
       if (!inWindow(m, mins)) continue;
       const W0 = S.win[m.event_ticker] || (S.win[m.event_ticker] = { label: label(m.ticker).replace(/ ≥ \$[\d,.]+/, ''), series, close: Date.parse(m.close_time), best: null });
-      if (!freshWin.has(m.event_ticker)) { freshWin.add(m.event_ticker); W0.bestV = null; }
+      if (!freshWin.has(m.event_ticker)) { freshWin.add(m.event_ticker); W0.bestV = null; W0.mk = null; }
       const lk = laneOf(m.event_ticker, m.close_time);
       if (laneBenched(lk)) { W0.blocked = W0.blocked || `🧠 ${laneName(lk)} benched — losing lately, self-learning sits it out until ${timeCT(new Date(laneState(lk).bench).toISOString())}`; continue; }
       if (a.held.has(m.event_ticker) || S.sc.ev[m.event_ticker]) { W0.traded = W0.traded || true; if (isFast(series)) S.stats.last15[series] = { t: m.ticker, done: true, mins, at: Date.now() }; continue; } // ONE trade per window
@@ -670,6 +776,8 @@ async function scan(fast) {
       }
       const verdicts = evaluate(m, cond[product], now);
       for (const v of verdicts) {
+        latest[m.ticker + '|' + v.side] = v;
+        if (CFG.MAKER === 1) { const mq = makerQuote(v); if (mq && (!W0.mk || mq.edge > W0.mk.edge)) W0.mk = { ...mq, v, m, product }; }
         if (env.BOT_DEBUG === '1') log('EVAL', m.ticker, v.side, JSON.stringify({ raw: v.raw, mkt: v.mkt, p: v.p, ask: v.ask, edge: v.edge, reasons: v.reasons }));
         if (!W0.best || v.edge > W0.best.edge) W0.best = { edge: v.edge, side: v.side, reasons: v.reasons.slice(0, 2) };
         if (!W0.bestV || v.edge > W0.bestV.edge) W0.bestV = { ...v, m, product, at: now, cond: condLine(cond[product], otherOf(cond, product)) };
@@ -679,7 +787,7 @@ async function scan(fast) {
   }
   for (const [k, v] of Object.entries(S.sc.ev)) if (v < Date.now() - 60e3) delete S.sc.ev[k];
   // always-in: every open window without a qualifying trade gets its better side, if not negative after fees
-  if (CFG.ALWAYS_IN === 1 && !S.led.safe) {
+  if (CFG.ALWAYS_IN === 1 && !S.led.safe && CFG.MAKER !== 1) { // with limit bids on, "always in" = a resting bid in every window (below)
     const have = new Set(cands.map(c => c.m.event_ticker));
     for (const [ev, w] of Object.entries(S.win)) {
       const v = w.bestV; if (!v || have.has(ev) || w.traded || isFast(w.series) !== !!fast || Date.now() - v.at > 30e3) continue;
@@ -695,7 +803,7 @@ async function scan(fast) {
   const used = new Set(); let sent = 0;
   for (const c of cands) {
     if (sent >= CFG.MAX_ALERTS_PER_RUN) break;
-    if (used.has(c.m.event_ticker)) continue;
+    if (used.has(c.m.event_ticker) || restingFor(c.m.event_ticker)) continue;
     const fastSeries = isFast(c.m.event_ticker.split('-')[0]);
     const autoFast = fastSeries && CFG.AUTO_FAST === 1 && !S.led.fastOff;
     const autoHour = !fastSeries && CFG.AUTO_HOURLY === 1 && !S.led.fastOff;
@@ -721,17 +829,18 @@ async function scan(fast) {
     // size within: per-trade cap, today's remaining budget, AND the cash actually in the wallet (fees + slippage included)
     const worst = limit || Math.min(c.ask + CFG.MAX_SLIPPAGE, 0.99);
     const fastLeft = autoFast && !S.unlocked && CFG.FAST_DAY > 0 ? CFG.FAST_DAY - (S.led.fast || 0) : Infinity;
-    const oc = a.exposure !== null && a.exposure !== undefined ? a.exposure : openCost(), room = CFG.MAX_OPEN_PCT * (a.cash + oc) - oc; // never tie up more than MAX_OPEN_PCT of the money at once
+    const oc = (a.exposure !== null && a.exposure !== undefined ? a.exposure : openCost()) + restingCost(), room = CFG.MAX_OPEN_PCT * (a.cash + oc) - oc; // never tie up more than MAX_OPEN_PCT of the money at once
     const W1 = S.win[c.m.event_ticker], skip = why => { if (W1 && !W1.traded) W1.skip = why; };
-    if (auto && room < 0.15 && a.cash - CFG.RESERVE >= 0.5) { skip(`🔒 ${money(oc)} already in open bets (max ${Math.round(CFG.MAX_OPEN_PCT * 100)}% of money)`); if (Date.now() - (S.roomWarned || 0) > 60 * 60e3) { S.roomWarned = Date.now(); log('exposure cap', money(oc), 'open'); } continue; }
-    const budget = Math.min(a.tradeCap, remaining, a.cash - Math.max(CFG.RESERVE, 0.02), fastLeft, auto ? Math.max(room, 0) : Infinity, c.always ? Math.max(0.5, a.cash * CFG.ALWAYS_PCT) : Infinity);
+    if (auto && room < 0.15 && a.cash - resv(a) >= 0.5) { skip(`🔒 ${money(oc)} already in open bets (max ${Math.round(CFG.MAX_OPEN_PCT * 100)}% of money)`); if (Date.now() - (S.roomWarned || 0) > 60 * 60e3) { S.roomWarned = Date.now(); log('exposure cap', money(oc), 'open'); } continue; }
+    const budget = Math.min(a.tradeCap, remaining, a.cash - restingCost() - Math.max(resv(a), 0.02), fastLeft, auto ? Math.max(room, 0) : Infinity, c.always ? Math.max(0.5, a.cash * CFG.ALWAYS_PCT) : Infinity,
+      auto && CFG.KELLY > 0 ? stakeFor(c.p, worst, a.cash + oc) : Infinity);
     let count = Math.floor(budget / worst);
     while (count > 0 && count * worst + feeTotal(count, worst) > budget) count--;
     if (S.led.safe && count > 1) count = 1; // safe mode after a losing day: smallest possible bets
-    if (count < 1) skip(`💸 not enough free cash for 1 at ${cents(worst)} (${money(Math.max(0, budget))} usable: wallet ${money(a.cash)}, ${money(CFG.RESERVE)} kept safe, ${money(oc)} in open bets)`);
+    if (count < 1) skip(`💸 not enough free cash for 1 at ${cents(worst)} (${money(Math.max(0, budget))} usable: wallet ${money(a.cash)}, ${money(resv(a))} kept safe, ${money(oc)} in open bets)`);
     if (auto && count >= 1) { const depth = bookDepth(c.m, c.side, worst); if (depth < count) count = Math.floor(depth); if (count < 1 && c.m._book) { skip(`📉 nobody selling at ≤${cents(worst)}`); S.nlq = S.nlq || {}; if (!S.nlq[c.m.ticker]) { S.nlq[c.m.ticker] = 1; log('no liquidity', c.m.ticker, c.side, worst); } continue; } }
     if (env.BOT_DEBUG === '1') log('SIZE', c.m.ticker, JSON.stringify({ cap: a.tradeCap, remaining, cash: a.cash, worst, count }));
-    if (count < 1) { if (a.cash - CFG.RESERVE < worst + 0.02 && Date.now() - (S.lowCashWarned || 0) > 30 * 60e3) { S.lowCashWarned = Date.now(); await say(`💸 Wallet low: ${money(a.cash)} (keeping ${money(CFG.RESERVE)} safe). Trading paused until funds are added on Kalshi — or /set reserve 0.`); } continue; }
+    if (count < 1) { if (a.cash - resv(a) < worst + 0.02 && Date.now() - (S.lowCashWarned || 0) > 30 * 60e3) { S.lowCashWarned = Date.now(); await say(`💸 Wallet low: ${money(a.cash)} (keeping ${money(resv(a))} safe). Trading paused until funds are added on Kalshi — or /set reserve 0.`); } continue; }
     S.sc.open.push({ t: c.m.ticker, s: c.side[0], p: Math.round(c.p * 1000) / 1000, pb: Math.round((c.pb ?? c.p) * 1000), mk: Math.round((c.mkt ?? c.ask) * 1000), a: c.ask, c: Date.parse(c.m.close_time) }); if (S.sc.open.length > 25) S.sc.open.shift();
     used.add(c.m.event_ticker); S.recentAlerts[c.m.ticker] = Date.now(); S.sc.ev[c.m.event_ticker] = Date.parse(c.m.close_time); sent++;
     const fee = feeTotal(count, c.ask), cost = count * c.ask + fee;
@@ -788,6 +897,26 @@ async function scan(fast) {
       });
     }
   }
+  if (CFG.MAKER === 1) {
+    await manageBids(latest, fast);
+    const autoOn = fast ? CFG.AUTO_FAST === 1 : CFG.AUTO_HOURLY === 1;
+    if (autoOn && !S.paused && !S.led.fastOff) {
+      const wins = Object.entries(S.win).filter(([ev, w]) => w.mk && isFast(w.series) === !!fast && !w.traded && freshWin.has(ev)).sort((x, y) => y[1].mk.edge - x[1].mk.edge);
+      if (env.BOT_DEBUG_BIDS === '1') log('MKWINS', fast, Object.entries(S.win).filter(([ev]) => freshWin.has(ev)).map(([ev, w]) => `${ev}:${w.mk ? w.mk.q + '/' + w.mk.edge.toFixed(3) : 'none'}${w.traded ? ':T' : ''}`).join(' '));
+      for (const [ev, w] of wins) {
+        if (restingFor(ev) || a.held.has(ev) || used.has(ev)) continue;
+        const lk = laneOf(ev, w.mk.m.close_time); if (laneBenched(lk) || w.mk.edge < CFG.MAKER_EDGE + laneBar(lk)) continue;
+        const { q, v, m, product } = w.mk;
+        const oc = (a.exposure ?? openCost()) + restingCost(), equity = a.cash + oc, room = CFG.MAX_OPEN_PCT * equity - oc;
+        const free = a.cash - restingCost() - Math.max(resv(a), 0.02);
+        const budget = Math.min(free, room, stakeFor(v.p, q, equity));
+        let n = Math.floor(budget / (q + makerFee(q)) + 1e-9); if (S.led.safe) n = Math.min(n, 1);
+        if (n < 1) { w.skip = free < q + 0.02 ? `💸 not enough free cash for a bid at ${cents(q)} (${money(Math.max(0, free))} usable, ${money(resv(a))} kept safe)` : `🔒 ${money(oc)} already in bets/bids (max ${Math.round(CFG.MAX_OPEN_PCT * 100)}%)`; continue; }
+        try { await postBid(m, v, q, n, product); used.add(ev); w.skip = null; }
+        catch (e) { log('bid failed', m.ticker, e.message); if (!/post.?only|cross/i.test(e.message)) { S.bidErr = S.bidErr || {}; if (!S.bidErr[ev]) { S.bidErr[ev] = 1; await say(`⚠️ Limit bid failed (${label(m.ticker)}): ${e.message.replace(/^.*?-> /, '').slice(0, 160)}`); } } }
+      }
+    }
+  }
 }
 
 async function applySetting(name, raw) {
@@ -799,7 +928,7 @@ async function applySetting(name, raw) {
     CFG.SERIES = list; await saveSettings(); return '✅ coins = ' + String(raw).toUpperCase();
   }
   const x = SETTINGS[name]; let v = Number(String(raw ?? '').replace(/[$%¢]/g, ''));
-  if (['edge', 'autoedge', 'grace', 'minprice', 'maxprice', 'autotrade', 'autoday'].includes(name) && v >= 1 && v <= 100) v = v / 100; // /set edge 8 = 8¢
+  if (['edge', 'autoedge', 'grace', 'minprice', 'maxprice', 'autotrade', 'autoday', 'makeredge'].includes(name) && v >= 1 && v <= 100) v = v / 100; // /set edge 8 = 8¢
   if (!x || !(v === v)) return 'Usage: /set <name> <value>\nExample: /set trade 3\nSee /help for names.';
   if (v < x.min || v > x.max) return `❌ ${name} must be between ${x.min} and ${x.max}.`;
   const old = CFG[x.key]; CFG[x.key] = v;
@@ -1014,8 +1143,9 @@ async function onUpdate(u) {
   }
   if (t.startsWith('/coins')) return coverageReport();
   if (t.startsWith('/learn')) return say(calText() + '\n\n' + lanesText());
+  if (t.startsWith('/bids')) { const r = Object.values(S.rest || {}); return say(r.length ? `📋 Resting limit bids (${money(restingCost())} reserved):\n` + r.map(o => `• ${label(o.t)} ${o.side.toUpperCase()} ${o.n} @ ${cents(o.q)} · win chance ${Math.round(o.p * 100)}%${o.filled ? ` · ${o.filled} filled` : ''}`).join('\n') : `📋 No resting bids right now. Limit bids: ${CFG.MAKER === 1 ? 'ON' : 'OFF (/set maker 1)'}`); }
   if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins all  (or btc,eth,sol,…)');
-  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/news – market-moving headlines + pauses\n/research – what the self-test learned\n/coins – which coins & markets are live\n/learn – self-learning results per market\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol,xrp,doge,bnb,hype,near,zec (or all)');
+  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/news – market-moving headlines + pauses\n/research – what the self-test learned\n/coins – which coins & markets are live\n/learn – self-learning results per market\n/bids – resting limit bids\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol,xrp,doge,bnb,hype,near,zec (or all)');
   if (t.startsWith('/set')) { const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
   if (t.startsWith('/rollback')) return rollback();
   if (t.startsWith('/claude') || !t.startsWith('/')) {
@@ -1025,7 +1155,7 @@ async function onUpdate(u) {
   }
   try {
     const a = await account();
-    return say(`📊 Status\nMode: ${S.paused ? 'PAUSED' : S.unlocked ? 'AUTO' : 'CONFIRM (you tap to buy)'}\nAuto 15-min: ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : S.led.safe ? 'ON · 🛡 SAFE MODE today (1 contract, 5¢+ edges)' : 'ON'} · today ${money(S.led.fast || 0)}/${CFG.FAST_DAY > 0 ? money(CFG.FAST_DAY) : 'no limit'} · result ${(S.led.autoPnl || 0) >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\nAuto hourly: ${CFG.AUTO_HOURLY !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : S.led.safe ? 'ON · 🛡 SAFE MODE' : 'ON'} · always-in ${CFG.ALWAYS_IN === 1 ? 'ON' : 'OFF'} · 🛡 reserve ${money(CFG.RESERVE)} · max ${Math.round(CFG.TRADE_PCT * 100)}% of wallet/trade\nCash: ${money(a.cash)}\nProfit since start: ${money(a.profit)} (auto at ${money(CFG.UNLOCK_PROFIT)})\nToday: ${money(a.spent)} of ${money(a.dayCap)} · max ${money(a.tradeCap)}/trade\nLast scan: ${S.lastScan ? timeCT(S.lastScan) : 'not yet'}${S.lastError ? '\nLast error: ' + S.lastError : ''}\n\n/help for all commands`);
+    return say(`📊 Status\nMode: ${S.paused ? 'PAUSED' : S.unlocked ? 'AUTO' : 'CONFIRM (you tap to buy)'}\nAuto 15-min: ${CFG.AUTO_FAST !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : S.led.safe ? 'ON · 🛡 SAFE MODE today (1 contract, 5¢+ edges)' : 'ON'} · today ${money(S.led.fast || 0)}/${CFG.FAST_DAY > 0 ? money(CFG.FAST_DAY) : 'no limit'} · result ${(S.led.autoPnl || 0) >= 0 ? '+' : '−'}${money(Math.abs(S.led.autoPnl || 0))}\nAuto hourly: ${CFG.AUTO_HOURLY !== 1 ? 'OFF' : S.led.fastOff ? 'STOPPED for today' : S.led.safe ? 'ON · 🛡 SAFE MODE' : 'ON'} · always-in ${CFG.ALWAYS_IN === 1 ? 'ON' : 'OFF'} · 🛡 reserve ${money(resv(a))} · max ${Math.round(CFG.TRADE_PCT * 100)}% of wallet/trade\nCash: ${money(a.cash)} · 📋 limit bids ${CFG.MAKER === 1 ? `ON (${Object.keys(S.rest || {}).length} resting)` : 'OFF'} · sizing ${CFG.KELLY > 0 ? `½-Kelly, max ${Math.round(CFG.TRADE_PCT * 100)}%/trade` : 'fixed'}\nProfit since start: ${money(a.profit)} (auto at ${money(CFG.UNLOCK_PROFIT)})\nToday: ${money(a.spent)} of ${money(a.dayCap)} · max ${money(a.tradeCap)}/trade\nLast scan: ${S.lastScan ? timeCT(S.lastScan) : 'not yet'}${S.lastError ? '\nLast error: ' + S.lastError : ''}\n\n/help for all commands`);
   } catch (e) { return say('⚠️ Can\'t reach Kalshi: ' + e.message.slice(0, 200)); }
 }
 
@@ -1052,7 +1182,7 @@ http.createServer((rq, rs) => {
     { command: 'claude', description: 'Talk to Claude / ask for changes' }, { command: 'status', description: 'Money, profit & mode' },
     { command: 'stats', description: 'Prediction scorecard' }, { command: 'settings', description: 'See all settings' }, { command: 'set', description: 'Change a setting: /set trade 3' },
     { command: 'scan', description: 'Scan for trades now' }, { command: 'pause', description: 'Stop trading' }, { command: 'resume', description: 'Start again' },
-    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'report', description: 'Today: trades, wins, losses, P&L' }, { command: 'news', description: 'Market-moving news + pauses' }, { command: 'research', description: 'What the self-test learned' }, { command: 'coins', description: 'Which coins/markets are live' }, { command: 'learn', description: 'Self-learning results per market' }, { command: 'why', description: 'Why it is/isn\'t trading 15-min now' }, { command: 'rollback', description: 'Undo last code change' },
+    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'report', description: 'Today: trades, wins, losses, P&L' }, { command: 'news', description: 'Market-moving news + pauses' }, { command: 'research', description: 'What the self-test learned' }, { command: 'coins', description: 'Which coins/markets are live' }, { command: 'learn', description: 'Self-learning results per market' }, { command: 'bids', description: 'Resting limit bids' }, { command: 'why', description: 'Why it is/isn\'t trading 15-min now' }, { command: 'rollback', description: 'Undo last code change' },
     { command: 'help', description: 'All commands' }] });
   await loadSettings(); schedule();
   try { const me = await tg('getMe', {}); log('SELFCHECK telegram', me.ok ? 'OK @' + me.result.username : 'FAILED'); } catch (e) { log('SELFCHECK telegram FAILED', e.message); }
