@@ -53,8 +53,10 @@ const CFG = {
   ALWAYS_EDGE: 0,    // min edge (¢) for always-in entries (0 = break-even or better)
   ALWAYS_PCT: 0.10,  // always-in entries use 10% of wallet
   DAILY: 1,          // also trade the daily 5 PM ET markets (up to 24h ahead)
+  DAILY_MIN_EQUITY: 20, // ...but only once the account has $20+ (a daily bet locks money for up to a day; small wallets need 15-min turnover)
   MAX_OPEN_PCT: 0.60, // never have more than 60% of the money tied up in open positions at once
-  LEARN: 1,          // self-learning: each market type (coin x 15-min/hourly/daily) tightens or benches itself from its own real results
+  LEARN: 1,
+  CAL: 1,            // self-calibration: shrink the model toward the market by how much its past disagreements came true          // self-learning: each market type (coin x 15-min/hourly/daily) tightens or benches itself from its own real results
   MAX_ALERTS_PER_RUN: 2, ALERT_TTL_MIN: 4, MAX_SLIPPAGE: 0.02,
   SCAN_EVERY_MIN: 1, TZ: 'America/Chicago',
 };
@@ -88,8 +90,10 @@ const SETTINGS = {
   fastday:  { key: 'FAST_DAY', desc: 'max $ per day on auto 15-min trades (0 = no limit)', min: 0, max: 10000 },
   grace:    { key: 'AUTO_GRACE', desc: 'auto: max ¢ above live ask to get filled (0.03 = 3¢)', min: 0, max: 0.1 },
   streak:   { key: 'FAST_STREAK', desc: 'stop auto for the day after N losses in a row', min: 2, max: 100 },
+  dailymin: { key: 'DAILY_MIN_EQUITY', desc: 'only trade daily markets with at least this much money ($)', min: 0, max: 100000 },
   daily:    { key: 'DAILY', desc: 'trade daily 5 PM ET markets (1 = on, 0 = off)', min: 0, max: 1 },
   maxopen:  { key: 'MAX_OPEN_PCT', desc: 'max share of money in open positions (0.6 = 60%)', min: 0.1, max: 1 },
+  calib:    { key: 'CAL', desc: 'self-calibration from real results (1 = on, 0 = off)', min: 0, max: 1 },
   learn:    { key: 'LEARN', desc: 'self-learning from real results (1 = on, 0 = off)', min: 0, max: 1 },
   fastloss: { key: 'FAST_MAX_LOSS', desc: 'stop auto for the day after losing $ (0 = 40% of start-of-day wallet)', min: 0, max: 10000 },
 };
@@ -103,7 +107,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 9; blob.LANES = S.lanes; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 9; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -134,6 +138,7 @@ async function loadSettings() {
     if (blob.SETL > 0) S.setlTs = blob.SETL;
     if (blob.LRN && typeof blob.LRN === 'object') S.learn = blob.LRN;
     if (blob.LANES && typeof blob.LANES === 'object') S.lanes = blob.LANES;
+    if (blob.CALFIT && typeof blob.CALFIT === "object") S.cal = blob.CALFIT;
     if (blob.LED && typeof blob.LED.spent === 'number') S.led = { ...newLed(blob.LED.day), ...blob.LED };
     if (S.led.fastOff) { S.led.fastOff = false; S.led.safe = true; setTimeout(() => { saveSettings(); say('🛡 Loss stop switched to SAFE MODE: trading again now — 1 contract at a time, only 5¢+ edges, no always-in. Back to normal size at midnight CT.'); }, 3000); }
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
@@ -522,7 +527,8 @@ function evaluate(m, st, now = Date.now()) {
   const W = CFG.MODEL_WEIGHT, out = [];
   for (const s of [{ side: 'yes', raw: pY, mkt: mid, ask: yAsk }, { side: 'no', raw: 1 - pY, mkt: 1 - mid, ask: nAsk }]) {
     s.mins = mins; s.spread = spread; s.spot = st.spot; s.sig = sig;
-    s.p = W * s.raw + (1 - W) * s.mkt;
+    s.pb = W * s.raw + (1 - W) * s.mkt;                 // model/market blend
+    s.p = s.mkt + calLam() * (s.pb - s.mkt);           // self-calibrated: shrunk toward the market by what real results showed
     s.edge = s.p - s.ask - (0.07 * s.ask * (1 - s.ask) + 0.005);
     // which way does this bet need the price to move?
     const up = sty.startsWith('greater') ? s.side === 'yes' : sty.startsWith('less') ? s.side === 'no' : null;
@@ -541,6 +547,30 @@ function evaluate(m, st, now = Date.now()) {
   return out;
 }
 
+// ---------- self-calibration from real results ----------
+// Every alert stores (blend probability, market price, outcome). The bot fits how much of its own
+// disagreement with the market actually came true (λ: 0 = market is always right, 1 = trust the model fully).
+// Seeded with the first 35 graded live alerts (Nov 22 2026): model was ~6 pts too confident.
+const CAL_SEED = [[50,41,1],[48,40,0],[48,40,0],[33,25,0],[50,41,1],[59,51,0],[51,42,1],[41,33,1],[46,37,0],[47,38,0],[26,17,0],[30,21,1],[23,15,1],[29,20,0],[59,50,1],[91,83,1],[45,36,1],[55,47,1],[40,31,0],[37,29,0],[34,26,0],[42,37,0],[24,20,0],[14,9,0],[18,13,0],[17,13,0],[14,10,0],[53,44,1],[56,47,0],[33,25,1],[45,37,0],[37,29,0],[30,21,0],[41,33,0],[23,15,0]];
+function calLam() { return CFG.CAL === 1 && S.cal && S.cal.lam >= 0 ? S.cal.lam : 1; }
+function fitCal() {
+  const seed = env.BOT_TEST === '1' && !S.testSeed ? [] : CAL_SEED.map(([p, m, y]) => [p * 10, m * 10, y]);
+  const h = seed.concat(S.sc.hist || []).slice(-300);
+  if (h.length < 30) return null;
+  const brier = lam => h.reduce((a, [p, m, y]) => { const q = (m + lam * (p - m)) / 1000; return a + (q - y) ** 2; }, 0) / h.length;
+  const b1 = brier(1); let best = 1, bb = b1;
+  for (let l = 0; l <= 1.25 + 1e-9; l += 0.05) { const b = brier(l); if (b < bb - 1e-6) { bb = b; best = Math.round(l * 100) / 100; } }
+  if (bb > b1 * (1 - 0.005)) best = 1; // same bar as the research engine: change only on a real (0.5%+) accuracy gain
+  const hit = h.reduce((a, x) => a + x[2], 0) / h.length, said = h.reduce((a, x) => a + x[0], 0) / h.length / 1000, mkt = h.reduce((a, x) => a + x[1], 0) / h.length / 1000;
+  return { lam: best, n: h.length, hit, said, mkt, at: Date.now() };
+}
+async function refitCal(announce = true) {
+  const r = fitCal(); if (!r) return;
+  const before = calLam(); S.cal = r;
+  if (announce && CFG.CAL === 1 && Math.abs(r.lam - before) >= 0.1) await say(`🧠 SELF-CALIBRATION · last ${r.n} graded picks: bot said ${Math.round(r.said * 100)}% on average, market said ${Math.round(r.mkt * 100)}%, reality ${Math.round(r.hit * 100)}%.\nNow trusting its own math ${Math.round(r.lam * 100)}% (was ${Math.round(before * 100)}%) — it only trades where an edge survives that.`);
+}
+const calText = () => S.cal ? `🎯 Self-calibration: last ${S.cal.n} picks — bot said ${Math.round(S.cal.said * 100)}%, market ${Math.round(S.cal.mkt * 100)}%, actual ${Math.round(S.cal.hit * 100)}% → trusting its own math ${Math.round(calLam() * 100)}%` : '🎯 Self-calibration: collecting results';
+
 // ---------- scan ----------
 function eventPause() {
   const cal = env.BOT_TEST === '1' && !S.testCal ? null : news.calendarPause();
@@ -553,6 +583,7 @@ function recapReason(w) {
   if (w.traded === true) return '✅ traded';
   if (w.blocked && !w.best) return `⏸ paused — ${w.blocked}`;
   if (S.led.fastOff && CFG.AUTO_FAST === 1) return '🛑 auto stopped today — /auto15 on to restart';
+  if (w.skip) return `⏭ ${w.skip}`;
   if (!w.best) return '⏭ no tradable price seen';
   const r = (w.best.reasons || []).filter(x => !/^edge .* below/.test(x));
   const edge = `best edge ${w.best.edge >= 0 ? '+' : ''}${(w.best.edge * 100).toFixed(1)}¢ (needs ${(CFG.AUTO_EDGE * 100).toFixed(0)}¢)`;
@@ -606,7 +637,8 @@ async function scan(fast) {
     }
     S.emptyN[series] = 0; (S.everHad = S.everHad || {})[series] = 1;
     const lo = isFast(series) ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES, hi = isFast(series) ? CFG.FAST_MAX_MINUTES : CFG.MAX_MINUTES;
-    const inWindow = (m, mins) => (mins >= lo && mins <= hi) || (!isFast(series) && CFG.DAILY === 1 && mins >= lo && mins <= 1440 && isDailyClose(m.close_time));
+    const dailyOK = CFG.DAILY === 1 && a.cash + (a.exposure || 0) >= CFG.DAILY_MIN_EQUITY;
+    const inWindow = (m, mins) => (mins >= lo && mins <= hi) || (!isFast(series) && dailyOK && mins >= lo && mins <= 1440 && isDailyClose(m.close_time));
     S.blk = S.blk || {};
     const blocked = cond[product].problems.length > 0, coinName = product.split('-')[0];
     const prev = S.blk[product];
@@ -653,8 +685,8 @@ async function scan(fast) {
       const v = w.bestV; if (!v || have.has(ev) || w.traded || isFast(w.series) !== !!fast || Date.now() - v.at > 30e3) continue;
       if (a.held.has(ev) || S.sc.ev[ev]) continue;
       if (laneBar(laneOf(ev, v.m.close_time)) > 0) continue; // self-learning: this market type lost lately, so only real edges count
-      const blockers = v.reasons.filter(r => !/^edge .* below/.test(r) && !/^price .* outside/.test(r));
-      if (blockers.length || !(v.ask >= 0.10 && v.ask <= 0.90) || v.edge < CFG.ALWAYS_EDGE / 100) continue;
+      const blockers = v.reasons.filter(r => !/^edge .* below/.test(r)); // price range applies: no 10¢ long shots (they lost 7 of 7 live)
+      if (blockers.length || v.edge < CFG.ALWAYS_EDGE / 100) continue;
       cands.push({ ...v, always: true });
     }
   }
@@ -676,7 +708,7 @@ async function scan(fast) {
       if (!c.m._live) { // hourly list prices can lag: re-price from the live book before trading
         try {
           const live = await withLiveQuote(c.m); const v = evaluate(live, S.lastCond[c.product]).find(x => x.side === c.side);
-          const blocked = !v || (c.always ? v.reasons.some(r => !/^edge .* below/.test(r) && !/^price .* outside/.test(r)) || v.edge < CFG.ALWAYS_EDGE / 100 : !v.ok);
+          const blocked = !v || (c.always ? v.reasons.some(r => !/^edge .* below/.test(r)) || v.edge < CFG.ALWAYS_EDGE / 100 : !v.ok);
           if (blocked) continue; Object.assign(c, v, { m: live });
         } catch (e) { continue; }
       }
@@ -690,15 +722,17 @@ async function scan(fast) {
     const worst = limit || Math.min(c.ask + CFG.MAX_SLIPPAGE, 0.99);
     const fastLeft = autoFast && !S.unlocked && CFG.FAST_DAY > 0 ? CFG.FAST_DAY - (S.led.fast || 0) : Infinity;
     const oc = a.exposure !== null && a.exposure !== undefined ? a.exposure : openCost(), room = CFG.MAX_OPEN_PCT * (a.cash + oc) - oc; // never tie up more than MAX_OPEN_PCT of the money at once
-    if (auto && room < 0.15 && a.cash - CFG.RESERVE >= 0.5) { if (Date.now() - (S.roomWarned || 0) > 60 * 60e3) { S.roomWarned = Date.now(); log('exposure cap', money(oc), 'open'); } continue; }
+    const W1 = S.win[c.m.event_ticker], skip = why => { if (W1 && !W1.traded) W1.skip = why; };
+    if (auto && room < 0.15 && a.cash - CFG.RESERVE >= 0.5) { skip(`🔒 ${money(oc)} already in open bets (max ${Math.round(CFG.MAX_OPEN_PCT * 100)}% of money)`); if (Date.now() - (S.roomWarned || 0) > 60 * 60e3) { S.roomWarned = Date.now(); log('exposure cap', money(oc), 'open'); } continue; }
     const budget = Math.min(a.tradeCap, remaining, a.cash - Math.max(CFG.RESERVE, 0.02), fastLeft, auto ? Math.max(room, 0) : Infinity, c.always ? Math.max(0.5, a.cash * CFG.ALWAYS_PCT) : Infinity);
     let count = Math.floor(budget / worst);
     while (count > 0 && count * worst + feeTotal(count, worst) > budget) count--;
     if (S.led.safe && count > 1) count = 1; // safe mode after a losing day: smallest possible bets
-    if (auto) { const depth = bookDepth(c.m, c.side, worst); if (depth < count) count = Math.floor(depth); if (count < 1 && c.m._book) { S.nlq = S.nlq || {}; if (!S.nlq[c.m.ticker]) { S.nlq[c.m.ticker] = 1; log('no liquidity', c.m.ticker, c.side, worst); } continue; } }
+    if (count < 1) skip(`💸 not enough free cash for 1 at ${cents(worst)} (${money(Math.max(0, budget))} usable: wallet ${money(a.cash)}, ${money(CFG.RESERVE)} kept safe, ${money(oc)} in open bets)`);
+    if (auto && count >= 1) { const depth = bookDepth(c.m, c.side, worst); if (depth < count) count = Math.floor(depth); if (count < 1 && c.m._book) { skip(`📉 nobody selling at ≤${cents(worst)}`); S.nlq = S.nlq || {}; if (!S.nlq[c.m.ticker]) { S.nlq[c.m.ticker] = 1; log('no liquidity', c.m.ticker, c.side, worst); } continue; } }
     if (env.BOT_DEBUG === '1') log('SIZE', c.m.ticker, JSON.stringify({ cap: a.tradeCap, remaining, cash: a.cash, worst, count }));
     if (count < 1) { if (a.cash - CFG.RESERVE < worst + 0.02 && Date.now() - (S.lowCashWarned || 0) > 30 * 60e3) { S.lowCashWarned = Date.now(); await say(`💸 Wallet low: ${money(a.cash)} (keeping ${money(CFG.RESERVE)} safe). Trading paused until funds are added on Kalshi — or /set reserve 0.`); } continue; }
-    S.sc.open.push({ t: c.m.ticker, s: c.side[0], p: Math.round(c.p * 1000) / 1000, a: c.ask, c: Date.parse(c.m.close_time) }); if (S.sc.open.length > 25) S.sc.open.shift();
+    S.sc.open.push({ t: c.m.ticker, s: c.side[0], p: Math.round(c.p * 1000) / 1000, pb: Math.round((c.pb ?? c.p) * 1000), mk: Math.round((c.mkt ?? c.ask) * 1000), a: c.ask, c: Date.parse(c.m.close_time) }); if (S.sc.open.length > 25) S.sc.open.shift();
     used.add(c.m.event_ticker); S.recentAlerts[c.m.ticker] = Date.now(); S.sc.ev[c.m.event_ticker] = Date.parse(c.m.close_time); sent++;
     const fee = feeTotal(count, c.ask), cost = count * c.ask + fee;
     const coin = c.product.split('-')[0];
@@ -719,7 +753,7 @@ async function scan(fast) {
           let live; try { live = await withLiveQuote(c.m); } catch (e) { break; }
           const v = evaluate(live, S.lastCond[c.product]).find(x => x.side === c.side);
           const need = c.always ? CFG.ALWAYS_EDGE / 100 : CFG.MIN_EDGE;
-          if (!v || v.reasons.some(x => !/^edge .* below/.test(x) && !(c.always && /^price .* outside/.test(x))) || v.edge < need) { log('retry stop', c.m.ticker, v && v.edge); break; }
+          if (!v || v.reasons.some(x => !/^edge .* below/.test(x)) || v.edge < need) { log('retry stop', c.m.ticker, v && v.edge); break; }
           const lim = bestLimit(v.p, v.ask, c.always ? need : CFG.AUTO_EDGE / 2, CFG.AUTO_GRACE); if (lim === null) break;
           let n = Math.min(count, Math.floor(bookDepth(live, c.side, lim)));
           while (n > 0 && n * lim + feeTotal(n, lim) > budget) n--;
@@ -979,7 +1013,7 @@ async function onUpdate(u) {
     return say(lanesText() + `\n\n📈 Scorecard (every alert, 1 contract each)\nSettled: ${n} · waiting: ${c.open.length}\nBot predicted wins: ${(c.sumP / n * 100).toFixed(0)}% · actual: ${(c.wins / n * 100).toFixed(0)}%\nPaper profit: ${c.pnl >= 0 ? '+' : '−'}${money(Math.abs(c.pnl))} (${(c.pnl / n * 100).toFixed(1)}¢ per alert)\nAccuracy score (Brier, lower is better): ${(c.brier / n).toFixed(3)}\n${n < 50 ? 'Under 50 results is mostly luck — judge it after 50+.' : ''}`);
   }
   if (t.startsWith('/coins')) return coverageReport();
-  if (t.startsWith('/learn')) return say(lanesText());
+  if (t.startsWith('/learn')) return say(calText() + '\n\n' + lanesText());
   if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins all  (or btc,eth,sol,…)');
   if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/news – market-moving headlines + pauses\n/research – what the self-test learned\n/coins – which coins & markets are live\n/learn – self-learning results per market\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol,xrp,doge,bnb,hype,near,zec (or all)');
   if (t.startsWith('/set')) { const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
@@ -1042,6 +1076,7 @@ http.createServer((rq, rs) => {
     } catch (e) { log('ORDERTEST FAILED', e.message); }
   }
   if (OWNER) say(`🟢 Bot running (version ${VERSION}). Send /help anytime.`);
+  setTimeout(() => refitCal(true).catch(e => log('calibration failed', e.message)), 4000);
   if (env.BOT_TEST !== '1') setTimeout(() => coverageReport().catch(e => log('coverage failed', e.message)), 25e3);
 });
 
@@ -1136,12 +1171,15 @@ async function scoreAlerts() {
     if (res !== 'yes' && res !== 'no') { if (Date.now() > o.c + 6 * 3600e3) { S.sc.open = S.sc.open.filter(x => x !== o); changed = true; } continue; }
     const win = (o.s === 'y' ? 'yes' : 'no') === res ? 1 : 0;
     S.sc.n++; S.sc.wins += win; S.sc.sumP += o.p; S.sc.brier += (o.p - win) ** 2;
+    if (o.pb >= 0 && o.mk >= 0) { S.sc.hist = (S.sc.hist || []).concat([[o.pb, o.mk, win]]).slice(-200); calDirty = true; }
     S.sc.pnl += win - o.a - 0.07 * o.a * (1 - o.a); // per 1 contract, after fee
     await say(`📝 Alert check · ${label(o.t)} ${o.s === 'y' ? 'YES' : 'NO'} @ ${cents(o.a)} → ${win ? '✅ right' : '❌ wrong'} (bot said ${Math.round(o.p * 100)}%) · scorecard ${S.sc.wins}/${S.sc.n}`);
     S.sc.open = S.sc.open.filter(x => x !== o); changed = true;
   }
+  if (calDirty) { calDirty = false; await refitCal(); }
   if (changed) await saveSettings();
 }
+let calDirty = false;
 
 async function tick(fast = false, both = false) {
   const lock = fast ? 'busyFast' : 'busySlow';

@@ -72,6 +72,16 @@ if (!RESTARTED) {
     ok(/SAFE MODE today/.test(last()), '/status shows safe mode', last());
     await send('/auto15 on'); await wait(300); await send('/status'); await wait(500);
     ok(/Auto 15-min: ON ·/.test(last()) && !/SAFE MODE/.test(last()), '/auto15 on returns to normal size', last());
+    console.log('\nSelf-calibration from real results');
+    await send('/set calib 1'); await wait(300);
+    await send('/learn'); await wait(400);
+    ok(/Self-calibration: last 60 picks — bot said 48%, market 40%, actual 40% → trusting its own math 0%/.test(last()), 'fits how much of its disagreement came true (here: none)', last().split('\n')[0]);
+    for (const k of Object.keys(W.markets)) if (!W.markets[k].keep) delete W.markets[k];
+    const o2 = W.orders.length, fake = market('KXSOL15M', 'sol', 9, 139.93, -0.17);
+    await send('/_fasttick'); await wait(3000);
+    ok(!W.orders.slice(o2).some(o => o.ticker === fake.ticker), 'calibrated: a model-only "edge" the market disagrees with is not traded');
+    await send('/set calib 0'); await wait(300); await send('/_fasttick'); await wait(3000);
+    ok(W.orders.slice(o2).some(o => o.ticker === fake.ticker), '/set calib 0 turns it off (trades the raw edge again)');
     console.log(`\nRESULT: ${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);
   }
 
@@ -138,6 +148,11 @@ if (!RESTARTED) {
   console.log('\n6. Daily markets (5 PM ET)');
   clear(); await wait(21000); o0 = W.orders.length; // let Kalshi's position list (cached 20s) show the closed positions gone
   const nx = next5pmET(), mins = (nx.t - Date.now()) / 60e3;
+  await send('/set dailymin 1000'); await wait(200);
+  const dly0 = market('KXBTCD', 'btc', mins, 59900, -0.17, { ev: `KXBTCD-${nx.code}`, close: nx.t });
+  await send('/scan'); await wait(4000);
+  ok(!orders().slice(o0).includes(dly0.ticker), 'small wallet: daily markets skipped (money stays free for 15-min turnover)');
+  delete W.markets[dly0.ticker]; await send('/set dailymin 0'); await wait(200); o0 = W.orders.length;
   const dly = market('KXBTCD', 'btc', mins, 59900, -0.17, { ev: `KXBTCD-${nx.code}`, close: nx.t });
   const far = market('KXBTCD', 'btc', 300, 59900, -0.12, { close: Math.floor((Date.now() + 300 * 60e3) / 3600e3) * 3600e3 + 1800e3 }); // ~5h out at :30 → not a daily, not within the hour
   await send('/scan'); await wait(5000);
@@ -167,7 +182,9 @@ if (!RESTARTED) {
   const pin = W.pinned; let blob = null;
   try { const zi = pin.indexOf('\nZ:'); blob = zi >= 0 ? JSON.parse(zlib.inflateRawSync(Buffer.from(pin.slice(zi + 3), 'base64')).toString()) : JSON.parse(pin.slice(pin.indexOf('{'))); } catch (e) {}
   ok(pin.length <= 4096 && blob && blob.LANES && blob.LANES['DOGE|m15'] && blob.LANES['DOGE|m15'].bench > Date.now(), 'self-learning saved in the pinned message (fits Telegram limit)', pin.length);
-  blob.LED.fastOff = true; blob.LED.autoPnl = -3; blob.ALWAYS_IN = 1; // the live situation: yesterday's-style hard stop is on when the new code boots
+  blob.LED.fastOff = true; blob.LED.autoPnl = -3; blob.ALWAYS_IN = 1;
+  blob.CAL = 0; // calibration off at first; history says the model ran 8 pts hotter than reality (market was right)
+  blob.SC.hist = Array.from({ length: 60 }, (_, i) => [480, 400, i % 5 < 2 ? 1 : 0]); // the live situation: yesterday's-style hard stop is on when the new code boots
   fs.writeFileSync('/tmp/kbot_coins_pinned.txt', '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob));
   const r = require('child_process').spawnSync(process.execPath, [__filename], { env: { ...process.env, COINS_RESTART: '1' }, encoding: 'utf8', timeout: 60e3 });
   process.stdout.write((r.stdout || '').split('\n').filter(l => /✅|❌|Restart/.test(l)).join('\n') + '\n');
