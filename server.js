@@ -433,9 +433,14 @@ async function coinState(product) {
   const med = a => { const v = a.map(x => x.px).sort((x, y) => x - y); return v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2; };
   const thr = /^(BTC|ETH)-/.test(product) ? 0.002 : 0.005, dropped = [];
   const spr = a => { const v = a.map(x => x.px); return (Math.max(...v) - Math.min(...v)) / med(a); };
-  if (pool.length >= 3 && spr(pool) > thr) { // ONE exchange off from all the others (thin book, perp premium): leave it out instead of pausing the coin
-    const m0 = med(pool), far = pool.slice().sort((a, b) => Math.abs(b.px - m0) - Math.abs(a.px - m0))[0], rest = pool.filter(x => x !== far);
-    if (spr(rest) <= thr) { dropped.push(far.src); pool = rest; } // if the rest still disagree, it's a real split: stay paused
+  { // exchanges off from the rest (thin book, perp premium): leave them out instead of pausing the coin,
+    // but only while a clear majority still agrees — a real split keeps the coin paused
+    let p2 = pool.slice(); const n0 = pool.length, out = [];
+    while (p2.length >= 3 && spr(p2) > thr && p2.length - 1 > n0 / 2) {
+      const srt = p2.slice().sort((a, b) => a.px - b.px), noLo = srt.slice(1), noHi = srt.slice(0, -1);
+      const dropHi = spr(noHi) <= spr(noLo); out.push(dropHi ? srt[srt.length - 1].src : srt[0].src); p2 = dropHi ? noHi : noLo;
+    }
+    if (p2.length >= 2 && spr(p2) <= thr && out.length) { dropped.push(...out); pool = p2; }
   }
   const pxs = pool.map(x => x.px).sort((a, b) => a - b);
   const spot = !pxs.length ? NaN : pxs.length % 2 ? pxs[(pxs.length - 1) / 2] : (pxs[pxs.length / 2 - 1] + pxs[pxs.length / 2]) / 2; // median across exchanges
@@ -545,6 +550,7 @@ function recapReason(w) {
   if (w.traded && w.traded !== true) return `✅ bought ${w.traded.n} ${w.traded.side.toUpperCase()} @ ${cents(w.traded.px)}`;
   if (w.traded === true) return '✅ traded';
   if (w.blocked && !w.best) return `⏸ paused — ${w.blocked}`;
+  if (S.led.fastOff && CFG.AUTO_FAST === 1) return '🛑 daily loss stop on — restarts at midnight CT (/auto15 on to restart now)';
   if (!w.best) return '⏭ no tradable price seen';
   const r = (w.best.reasons || []).filter(x => !/^edge .* below/.test(x));
   const edge = `best edge ${w.best.edge >= 0 ? '+' : ''}${(w.best.edge * 100).toFixed(1)}¢ (needs ${(CFG.AUTO_EDGE * 100).toFixed(0)}¢)`;
@@ -584,7 +590,7 @@ async function scan(fast) {
   if (!!evp !== !!S.evpOn) { S.evpOn = evp; await say(evp ? `⏸📅 Trading paused — ${evp}. Resumes automatically.` : '▶️ Event pause over — trading resumed.'); }
   const lane = CFG.SERIES.filter(x => isFast(x) === !!fast && !(S.emptyUntil[x] > Date.now()));
   const [cond, lists] = await Promise.all([marketConditions(), Promise.all(lane.map(x => pageAll(`/markets?series_ticker=${x}&status=open`, 'markets').catch(e => { log('markets failed', x, e.message); return null; })))]);
-  const cands = [];
+  const cands = [], freshWin = new Set(); // windows re-priced in THIS scan (always-in only uses this scan's prices)
   S.lastCond = cond;
   for (const [si, series] of lane.entries()) {
     const product = CFG.SPOT[series]; if (!product || !cond[product]) continue;
@@ -613,12 +619,13 @@ async function scan(fast) {
     if (cond[product].problems.length && isFast(series)) S.stats.last15[series] = { blocked: cond[product].problems.join('; '), at: Date.now() };
     if (cond[product].problems.length) for (const m of markets) { const mins = (Date.parse(m.close_time) - now) / 60000; if (inWindow(m, mins)) { const W1 = S.win[m.event_ticker] || (S.win[m.event_ticker] = { label: label(m.ticker).replace(/ ≥ \$[\d,.]+/, ''), series, close: Date.parse(m.close_time), best: null }); W1.blocked = cond[product].problems[0]; } }
     if (cond[product].problems.length) { if (env.BOT_DEBUG === '1') log('COND', product, cond[product].problems.join('; '));
-      if (!S.condWarn || Date.now() - S.condWarn > 15 * 60e3) { S.condWarn = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; '), '|', cond[product].allPx || ''); } continue; }
+      S.condWarn = S.condWarn || {}; if (!S.condWarn[product] || Date.now() - S.condWarn[product] > 15 * 60e3) { S.condWarn[product] = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; '), '|', cond[product].allPx || ''); } continue; }
     for (const m of markets) if (S.win[m.event_ticker]) S.win[m.event_ticker].close = Date.parse(m.close_time); // keep recap timing in sync with Kalshi
     for (let m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
       if (!inWindow(m, mins)) continue;
       const W0 = S.win[m.event_ticker] || (S.win[m.event_ticker] = { label: label(m.ticker).replace(/ ≥ \$[\d,.]+/, ''), series, close: Date.parse(m.close_time), best: null });
+      if (!freshWin.has(m.event_ticker)) { freshWin.add(m.event_ticker); W0.bestV = null; }
       const lk = laneOf(m.event_ticker, m.close_time);
       if (laneBenched(lk)) { W0.blocked = W0.blocked || `🧠 ${laneName(lk)} benched — losing lately, self-learning sits it out until ${timeCT(new Date(laneState(lk).bench).toISOString())}`; continue; }
       if (a.held.has(m.event_ticker) || S.sc.ev[m.event_ticker]) { W0.traded = W0.traded || true; if (isFast(series)) S.stats.last15[series] = { t: m.ticker, done: true, mins, at: Date.now() }; continue; } // ONE trade per window

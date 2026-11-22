@@ -97,6 +97,12 @@ if (!RESTARTED) {
   const h2 = market('KXHYPE15M', 'hype', 9, 37.98, -0.17);
   await send('/_fasttick'); await wait(3000);
   ok(orders().slice(o0).includes(h2.ticker), 'one odd price source is left out instead of pausing the coin', orders().slice(o0).join(','));
+  // live case seen on ZEC: Hyperliquid +0.24%, Bitstamp & Gemini −0.3% → drop the one outlier that makes the rest agree
+  clear(); W.hlSkew = 1.0024; W.krakenSkew = 1.0001; W.bitstampSkew = 0.9968; W.geminiSkew = 0.9971; o0 = W.orders.length; // real ZEC readings: the old nearest-to-median rule dropped Bitstamp and stayed paused
+  const sol0 = W.sol; W.sol = sol0 * 0.99855; const z2 = market('KXSOL15M', 'sol', 9, 139.73, -0.17); W.sol = sol0; // priced off the 4 agreeing feeds
+  await send('/_fasttick'); await wait(3000);
+  ok(orders().slice(o0).includes(z2.ticker), 'ZEC live case (5 feeds, one high): the right outlier is dropped, coin keeps trading', orders().slice(o0).join(','));
+  W.bitstampSkew = 1; W.krakenSkew = 1; W.geminiSkew = 1;
   W.hlSkew = 1; W.krakenSkew = 1.01; W.geminiSkew = 1.01; clear(); o0 = W.orders.length; // a real 2-vs-2 split → stay paused
   const s9 = market('KXXRP15M', 'xrp', 9, 2.0989, -0.17);
   await send('/_fasttick'); await wait(3000);
@@ -130,6 +136,16 @@ if (!RESTARTED) {
   await send('/_fasttick'); await wait(2500);
   ok(W.orders.length === o0, 'no new trade when open positions already exceed the cap');
   await send('/set maxopen 0.6'); await wait(200);
+
+  console.log('\n7b. Always-in uses fresh prices every scan (no stale-best lockout)');
+  clear(); o0 = W.orders.length;
+  const ai = market('KXETH15M', 'eth', 9, 1679.95, -0.10); // small positive edge: always-in material, below the 5¢ auto bar
+  await send('/_fasttick'); await wait(2500);                // always-in is OFF: window seen, nothing bought
+  ok(W.orders.length === o0, 'small edge not bought while always-in is off');
+  await wait(31000); await send('/set always 1'); await wait(200);
+  await send('/_fasttick'); await wait(3000);
+  ok(orders().slice(o0).includes(ai.ticker), 'always-in enters 30s+ later at the same price (fresh price, not a stale best)', orders().slice(o0).join(','));
+  await send('/set always 0'); await wait(200);
 
   console.log('\n8. Coverage + saved state');
   await send('/coins'); await wait(3000);
