@@ -2,6 +2,7 @@
 // Env: KALSHI_KEY_ID, KALSHI_PRIVATE_KEY, TELEGRAM_BOT_TOKEN, [TELEGRAM_CHAT_ID], [BOT_START_TS], [KALSHI_ENV=demo]
 const http = require('http');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const research = require('./research');
 const news = require('./news');
 
@@ -21,9 +22,12 @@ const PUBLIC_URL = env.RENDER_EXTERNAL_URL || env.PUBLIC_URL || '';
 const BASE = env.KALSHI_ENV === 'demo' ? 'https://demo-api.kalshi.co' : 'https://api.elections.kalshi.com';
 const PREFIX = '/trade-api/v2';
 
+// every coin Kalshi lists crypto price markets for: hourly/daily (KX<coin>D) and 15-minute (KX<coin>15M)
+const COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'HYPE', 'NEAR', 'ZEC'];
+const ALL_SERIES = COINS.flatMap(c => [`KX${c}D`, `KX${c}15M`]);
 const CFG = {
-  SERIES: (env.BOT_SERIES || 'KXBTCD,KXETHD,KXBTC15M,KXETH15M').split(',').map(s => s.trim()).filter(Boolean),
-  SPOT: { KXBTCD: 'BTC-USD', KXBTC: 'BTC-USD', KXBTC15M: 'BTC-USD', KXETHD: 'ETH-USD', KXETH: 'ETH-USD', KXETH15M: 'ETH-USD', KXSOLD: 'SOL-USD', KXSOL15M: 'SOL-USD' },
+  SERIES: (env.BOT_SERIES || ALL_SERIES.join(',')).split(',').map(s => s.trim()).filter(Boolean),
+  SPOT: Object.fromEntries(COINS.flatMap(c => [[`KX${c}D`, `${c}-USD`], [`KX${c}`, `${c}-USD`], [`KX${c}15M`, `${c}-USD`]])),
   FAST_MIN_MINUTES: 1.5, FAST_MAX_MINUTES: 15, // 15-minute markets: trade while 1.5-15 min remain
   MIN_EDGE: Number(env.BOT_MIN_EDGE || 0.04), MAX_EDGE: 0.25, MAX_DISAGREE: 0.18,
   SHOCK_PCT: 0.006, // a 5-min move must be > 0.6% (and > 4x normal) to count as a shock
@@ -32,7 +36,7 @@ const CFG = {
   AUTO_EDGE: 0.05,    // auto trades need a slightly bigger edge than tap alerts (no human double-check)
   FAST_DAY: 0,        // max $ per day on auto 15-min trades (0 = no limit)
   FAST_MAX_LOSS: 0,   // stop auto trading for the day after losing this much (0 = 40% of the day's starting wallet)
-  FAST_STREAK: 4,     // ...or after this many losses in a row
+  FAST_STREAK: 8,     // ...or after this many losses in a row (many markets now, so 4 in a row is ordinary bad luck)
   AUTO_GRACE: 0.03,   // auto may pay up to 3¢ above the live ask (only while the edge survives)
   AUTO_TRIES: 3,      // re-read the live book and retry this many times within ~3 seconds
   MIN_PRICE: 0.15, MAX_PRICE: 0.85,
@@ -47,6 +51,9 @@ const CFG = {
   ALWAYS_IN: 1,      // hold a position in every market window (BTC/ETH hourly + 15-min) when the better side is not negative after fees
   ALWAYS_EDGE: 0,    // min edge (¢) for always-in entries (0 = break-even or better)
   ALWAYS_PCT: 0.10,  // always-in entries use 10% of wallet
+  DAILY: 1,          // also trade the daily 5 PM ET markets (up to 24h ahead)
+  MAX_OPEN_PCT: 0.60, // never have more than 60% of the money tied up in open positions at once
+  LEARN: 1,          // self-learning: each market type (coin x 15-min/hourly/daily) tightens or benches itself from its own real results
   MAX_ALERTS_PER_RUN: 2, ALERT_TTL_MIN: 4, MAX_SLIPPAGE: 0.02,
   SCAN_EVERY_MIN: 1, TZ: 'America/Chicago',
 };
@@ -79,9 +86,14 @@ const SETTINGS = {
   autoedge: { key: 'AUTO_EDGE', desc: 'min edge for auto 15-min trades (0.05 = 5¢)', min: 0.02, max: 0.5 },
   fastday:  { key: 'FAST_DAY', desc: 'max $ per day on auto 15-min trades (0 = no limit)', min: 0, max: 10000 },
   grace:    { key: 'AUTO_GRACE', desc: 'auto: max ¢ above live ask to get filled (0.03 = 3¢)', min: 0, max: 0.1 },
+  streak:   { key: 'FAST_STREAK', desc: 'stop auto for the day after N losses in a row', min: 2, max: 100 },
+  daily:    { key: 'DAILY', desc: 'trade daily 5 PM ET markets (1 = on, 0 = off)', min: 0, max: 1 },
+  maxopen:  { key: 'MAX_OPEN_PCT', desc: 'max share of money in open positions (0.6 = 60%)', min: 0.1, max: 1 },
+  learn:    { key: 'LEARN', desc: 'self-learning from real results (1 = on, 0 = off)', min: 0, max: 1 },
   fastloss: { key: 'FAST_MAX_LOSS', desc: 'stop auto for the day after losing $ (0 = 40% of start-of-day wallet)', min: 0, max: 10000 },
 };
-const COIN_SERIES = { BTC: ['KXBTCD', 'KXBTC15M'], ETH: ['KXETHD', 'KXETH15M'], SOL: ['KXSOLD', 'KXSOL15M'] };
+const COIN_SERIES = Object.fromEntries(COINS.map(c => [c, [`KX${c}D`, `KX${c}15M`]]));
+const coinOf = t => (String(t).match(new RegExp(`^KX(${COINS.join('|')})`)) || [])[1] || '';
 const isFast = s => /15M$/.test(s);
 const ttlFor = ticker => isFast(String(ticker).split('-')[0]) ? CFG.FAST_TTL_MIN : CFG.ALERT_TTL_MIN;
 let pinnedId = null;
@@ -90,9 +102,11 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 7; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 8; blob.LANES = S.lanes; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
+  if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
+  if (text.length > 4090) { S.led.auto = (S.led.auto || []).filter(x => !x.done).slice(-20); blob.LED = S.led; text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); }
   if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok || /not modified/.test(r.error || '')) return; }
   const r = await tg('sendMessage', { chat_id: OWNER, text, disable_notification: true });
   if (r.ok) { pinnedId = r.result.message_id; await tg('pinChatMessage', { chat_id: OWNER, message_id: pinnedId, disable_notification: true }); }
@@ -103,9 +117,11 @@ async function loadSettings() {
   const pm = r.ok && r.result.pinned_message;
   if (!pm || !String(pm.text || '').startsWith('⚙️ BOT SETTINGS')) return;
   try {
-    const blob = JSON.parse(pm.text.slice(pm.text.indexOf('{')));
+    const zi = pm.text.indexOf('\nZ:');
+    const blob = zi >= 0 ? JSON.parse(zlib.inflateRawSync(Buffer.from(pm.text.slice(zi + 3).trim(), 'base64')).toString()) : JSON.parse(pm.text.slice(pm.text.indexOf('{')));
     for (const x of Object.values(SETTINGS)) if (typeof blob[x.key] === 'number') CFG[x.key] = blob[x.key];
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
+    if (!(blob.v >= 8)) { for (const x of ALL_SERIES) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); CFG.FAST_STREAK = Math.max(CFG.FAST_STREAK || 0, 8); CFG.DAILY = 1; CFG.MAX_OPEN_PCT = 0.6; CFG.LEARN = 1; setTimeout(saveSettings, 2000); } // all coins + daily + self-learning
     if (!(blob.v >= 7)) { CFG.ALWAYS_IN = 1; CFG.ALWAYS_EDGE = 0; CFG.ALWAYS_PCT = 0.10; setTimeout(saveSettings, 2000); }
     if (!(blob.v >= 6)) { CFG.SMALL_DAY = 0; CFG.FAST_DAY = 0; CFG.FAST_MAX_LOSS = 0; CFG.AUTO_HOURLY = 1; CFG.TRADE_PCT = 0.25; CFG.RESERVE = 1; setTimeout(saveSettings, 2000); } // continuous auto, wallet protection
     if (!(blob.v >= 5)) { CFG.AUTO_FAST = 1; setTimeout(saveSettings, 2000); } // switch on auto 15-min once
@@ -115,6 +131,7 @@ async function loadSettings() {
     if (blob.SC && typeof blob.SC === 'object') S.sc = { ...S.sc, ...blob.SC, ev: blob.SC.ev || {} };
     if (blob.SETL > 0) S.setlTs = blob.SETL;
     if (blob.LRN && typeof blob.LRN === 'object') S.learn = blob.LRN;
+    if (blob.LANES && typeof blob.LANES === 'object') S.lanes = blob.LANES;
     if (blob.LED && typeof blob.LED.spent === 'number') S.led = { ...newLed(blob.LED.day), ...blob.LED };
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
@@ -127,9 +144,9 @@ const newLed = day => ({ day, spent: 0, fast: 0, autoPnl: 0, streak: 0, fastOff:
 // human label from a Kalshi ticker, e.g. KXBTC15M-26NOV211830-30 -> "BTC 15-min · 5:30 PM CT"
 function label(ticker) {
   const [ser, ev, k] = String(ticker).split('-');
-  const coin = (ser.match(/KX(BTC|ETH|SOL)/) || [])[1] || ser;
-  const kind = /15M$/.test(ser) ? '15-min' : /D$/.test(ser) ? 'hourly' : '';
+  const coin = coinOf(ser) || ser;
   const tm = (ev || '').match(/^\d{2}[A-Z]{3}\d{2}(\d{2})(\d{2})?$/);
+  const kind = /15M$/.test(ser) ? '15-min' : /D$/.test(ser) ? (tm && tm[1] === '17' && !tm[2] ? 'daily' : 'hourly') : '';
   let when = '';
   if (tm) { let h = (Number(tm[1]) + 23) % 24; const mm = tm[2] || '00'; when = `${h % 12 || 12}:${mm} ${h < 12 ? 'AM' : 'PM'} CT`; } // ticker time is ET
   const strike = k && /^T[\d.]+$/.test(k) ? ` ≥ ${money(Math.ceil(Number(k.slice(1))))}` : '';
@@ -150,7 +167,7 @@ async function rollDay(today) {
   S.led = { ...newLed(today), auto: S.led.auto || [] };
 }
 const S = { bootAt: Date.now(), win: {}, // per market window: best verdict seen, traded or not
-   learn: {}, newsSeen: new Set(), newsLog: [], newsPauseUntil: 0, newsPauseWhy: '', lastCond: {}, stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
+   learn: {}, lanes: {}, newsSeen: new Set(), newsLog: [], newsPauseUntil: 0, newsPauseWhy: '', lastCond: {}, stats: { fast: [], slow: [], skipped: {}, last15: {} }, candles: {}, led: newLed(''), sc: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} }, seen: {}, busy: false, pending: {}, recentAlerts: {}, paused: false, manualLock: false, unlocked: false, lastScan: null, lastError: null };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
@@ -260,7 +277,10 @@ async function accountRaw() {
   const spent = Math.max(fillSpent, S.led.spent); // never under-count
   // events we already hold
   const pos = await kalshi('GET', '/portfolio/positions?count_filter=position&limit=1000');
-  const held = new Set((pos.market_positions || []).filter(p => cnt(p, 'position') !== 0).map(p => p.ticker.split('-').slice(0, -1).join('-')));
+  const live = (pos.market_positions || []).filter(p => cnt(p, 'position') !== 0);
+  const held = new Set(live.map(p => p.ticker.split('-').slice(0, -1).join('-')));
+  const exps = live.map(p => d(p, 'market_exposure')).filter(x => x === x);
+  const exposure = exps.length ? exps.reduce((a, x) => a + Math.abs(x), 0) : null; // $ tied up in open positions (Kalshi's own number)
 
   if (!S.unlocked && !S.manualLock && profit >= CFG.UNLOCK_PROFIT) { S.unlocked = true; await say(`🔓 Profit hit ${money(profit)}. Auto-trading ON (${CFG.SCALED_TRADE_PCT*100}% of balance per trade, ${CFG.SCALED_DAY_PCT*100}% per day). /lock to stop.`); }
   else if (S.unlocked && profit < CFG.RELOCK_PROFIT) { S.unlocked = false; await say(`🔒 Profit fell to ${money(profit)}. Back to confirm mode (${money(CFG.SMALL_TRADE)}/trade, ${money(CFG.SMALL_DAY)}/day).`); }
@@ -269,7 +289,7 @@ async function accountRaw() {
   const dayCap = CFG.SMALL_DAY > 0 ? (S.unlocked ? Math.max(CFG.SMALL_DAY, cash * CFG.SCALED_DAY_PCT) : CFG.SMALL_DAY) : Infinity;
   // per-shard cash so we know what's really spendable
   const shards = {}; for (const x of b.balance_breakdown || []) shards[x.exchange_index] = Number(x.balance) || 0;
-  return { cash, shards, profit, spent, held, tradeCap, dayCap, settledCount: settles.length };
+  return { cash, shards, profit, spent, held, exposure, tradeCap, dayCap, settledCount: settles.length };
 }
 
 // Kalshi splits cash across exchange shards. Bots must fund the market's shard before ordering.
@@ -354,25 +374,55 @@ function probAbove(Sp, K, sig, T) { if (!(K > 0)) return NaN; const s = sig * Ma
 const sd = a => { const m = a.reduce((x, y) => x + y, 0) / a.length; return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / (a.length - 1)); };
 // Live read of BTC and ETH before every trade: price, momentum, volatility regime, data freshness.
 // Kalshi settles on CF Benchmarks' index, which blends several exchanges — so we do too.
-async function exchangePrices(product) {
+// Price sources per coin. Unsupported pairs are remembered (6h) so we don't spam exchanges that don't list a coin.
+const KRAKEN = { BTC: 'XBTUSD', DOGE: 'XDGUSD' }; // Kraken's own names; others are <COIN>USD
+const unsup = {}; // 'src|COIN' -> retry-after ms
+const isUnsup = k => unsup[k] && Date.now() < unsup[k];
+const markUnsup = (k, e) => { if (/-> (400|404|422)|Unknown|not found|unknown|invalid/i.test(String(e && e.message || e))) unsup[k] = Date.now() + 6 * 3600e3; };
+let hlMids = { t: 0, v: null, p: null };
+function hyperMids() { // Hyperliquid: every coin's live price in one call
+  if (hlMids.v && Date.now() - hlMids.t < 3e3) return Promise.resolve(hlMids.v);
+  if (hlMids.p) return hlMids.p;
+  hlMids.p = req('https://api.hyperliquid.xyz/info', { method: 'POST', body: { type: 'allMids' } })
+    .then(v => { hlMids = { t: Date.now(), v, p: null }; return v; }, e => { hlMids.p = null; throw e; });
+  return hlMids.p;
+}
+const pxCache = {}, PX_TTL = env.BOT_TEST === '1' ? 0 : 3e3;
+function exchangePrices(product) { // shared for ~3s so the 15-min and hourly scans don't double-ask the exchanges
+  const c = pxCache[product]; if (c && (c.p || Date.now() - c.t < PX_TTL)) return c.p || Promise.resolve(c.v);
+  const p = exchangePricesNow(product).then(v => { pxCache[product] = { t: Date.now(), v }; return v; }, e => { delete pxCache[product]; throw e; });
+  pxCache[product] = { t: 0, p }; return p;
+}
+async function exchangePricesNow(product) {
   const coin = product.split('-')[0], H = { 'User-Agent': 'kalshi-bot' };
-  const kr = { BTC: 'XBTUSD', ETH: 'ETHUSD' }[coin], bs = coin.toLowerCase() + 'usd';
+  const kr = KRAKEN[coin] || coin + 'USD', bs = coin.toLowerCase() + 'usd';
+  const src = (name, fn) => isUnsup(name + '|' + coin) ? Promise.reject(new Error('unsupported')) : fn().catch(e => { markUnsup(name + '|' + coin, e); throw e; });
   const tries = await Promise.allSettled([
-    req(`https://api.exchange.coinbase.com/products/${product}/ticker`, { headers: H }).then(t => ({ src: 'coinbase', px: Number(t.price), at: Date.parse(t.time) })),
-    req(`https://api.kraken.com/0/public/Ticker?pair=${kr}`, { headers: H }).then(t => { const k = Object.values(t.result || {})[0]; return { src: 'kraken', px: Number(k && k.c && k.c[0]), at: Date.now() }; }),
-    req(`https://www.bitstamp.net/api/v2/ticker/${bs}/`, { headers: H }).then(t => ({ src: 'bitstamp', px: Number(t.last), at: Number(t.timestamp) * 1000 })),
-    req(`https://api.gemini.com/v1/pubticker/${bs}`, { headers: H }).then(t => ({ src: 'gemini', px: Number(t.last), at: Number(t.volume && t.volume.timestamp) || Date.now() })),
+    src('coinbase', () => req(`https://api.exchange.coinbase.com/products/${product}/ticker`, { headers: H }).then(t => ({ src: 'coinbase', px: Number(t.price), at: Date.parse(t.time) }))),
+    src('kraken', () => req(`https://api.kraken.com/0/public/Ticker?pair=${kr}`, { headers: H }).then(t => { if (t.error && t.error.length) throw new Error(t.error.join(',')); const k = Object.values(t.result || {})[0]; return { src: 'kraken', px: Number(k && k.c && k.c[0]), at: Date.now() }; })),
+    src('bitstamp', () => req(`https://www.bitstamp.net/api/v2/ticker/${bs}/`, { headers: H }).then(t => ({ src: 'bitstamp', px: Number(t.last), at: Number(t.timestamp) * 1000 }))),
+    src('gemini', () => req(`https://api.gemini.com/v1/pubticker/${bs}`, { headers: H }).then(t => ({ src: 'gemini', px: Number(t.last), at: Number(t.volume && t.volume.timestamp) || Date.now() }))),
+    coin === 'BTC' || coin === 'ETH' ? Promise.reject(new Error('enough')) : hyperMids().then(v => ({ src: 'hyperliquid', px: Number(v && v[coin]), at: Date.now() })), // extra source for the smaller coins
   ]);
   return tries.filter(x => x.status === 'fulfilled' && x.value.px > 0).map(x => x.value);
+}
+// 1-minute candles, newest first, Coinbase format [time, low, high, open, close, vol]; Hyperliquid fills in for coins Coinbase lacks
+async function candles1m(product) {
+  const coin = product.split('-')[0], H = { 'User-Agent': 'kalshi-bot' };
+  if (!isUnsup('cbc|' + coin)) {
+    try { const v = await req(`https://api.exchange.coinbase.com/products/${product}/candles?granularity=60`, { headers: H }); if (Array.isArray(v) && v.length > 100) return v; }
+    catch (e) { markUnsup('cbc|' + coin, e); }
+  }
+  const end = Date.now(), rows = await req('https://api.hyperliquid.xyz/info', { method: 'POST', body: { type: 'candleSnapshot', req: { coin, interval: '1m', startTime: end - 301 * 60e3, endTime: end } } });
+  return (rows || []).map(k => [Math.floor(k.t / 1000), Number(k.l), Number(k.h), Number(k.o), Number(k.c), Number(k.v)]).reverse();
 }
 
 // Live read of one coin: fair price across exchanges, momentum, volatility regime, data freshness.
 async function coinState(product) {
-  const H = { 'User-Agent': 'kalshi-bot' };
   const [prices, c] = await Promise.all([
     exchangePrices(product),
     (S.candles[product] && Date.now() - S.candles[product].t < 30e3) ? S.candles[product].v
-      : req(`https://api.exchange.coinbase.com/products/${product}/candles?granularity=60`, { headers: H }).then(v => { S.candles[product] = { t: Date.now(), v }; return v; }),
+      : candles1m(product).then(v => { S.candles[product] = { t: Date.now(), v }; return v; }),
   ]);
   const candles = c.slice().reverse(); // oldest -> newest: [time, low, high, open, close, vol]
   const r = []; for (let i = 1; i < candles.length; i++) r.push(Math.log(candles[i][4] / candles[i - 1][4]));
@@ -386,6 +436,7 @@ async function coinState(product) {
   const pxAgo = n => { const target = nowS - n * 60; let best = candles[0]; for (const k of candles) if (k[0] <= target) best = k; return best[4]; };
   const ret = n => Math.log(spot / pxAgo(n));
   const freshest = Math.max(...prices.map(x => x.at || 0));
+  const major = /^(BTC|ETH)-/.test(product);
   const st = {
     product, spot, sig, sig15, sig5h, sources: freshP.map(x => x.src),
     r5: ret(5), r15: ret(15),
@@ -399,20 +450,30 @@ async function coinState(product) {
   if (freshP.length < 2) st.problems.push(`only ${freshP.length} live exchange price${freshP.length === 1 ? '' : 's'} available`);
   if (st.ageSec > 30) st.problems.push(`live price ${st.ageSec}s old`);
   if (st.candleLagSec > 600) st.problems.push(`price history ${Math.round(st.candleLagSec / 60)} min behind`);
-  if (st.spreadPct > 0.002) st.problems.push(`exchanges disagree ${(st.spreadPct * 100).toFixed(2)}%`);
-  if (Math.abs(st.z5) > 4 && Math.abs(st.r5) > CFG.SHOCK_PCT) st.problems.push(`sudden ${st.r5 > 0 ? 'spike' : 'drop'} ${(st.r5 * 100).toFixed(2)}% in 5 min`);
+  if (st.spreadPct > (major ? 0.002 : 0.005)) st.problems.push(`exchanges disagree ${(st.spreadPct * 100).toFixed(2)}%`); // small coins trade on thinner books
+  if (Math.abs(st.z5) > 4 && Math.abs(st.r5) > CFG.SHOCK_PCT * (major ? 1 : 1.5)) st.problems.push(`sudden ${st.r5 > 0 ? 'spike' : 'drop'} ${(st.r5 * 100).toFixed(2)}% in 5 min`);
   if (sig15 > 2.5 * sig5h) st.problems.push('volatility spiking');
   return st;
 }
+const activeCoins = () => [...new Set(['BTC', 'ETH', ...CFG.SERIES.map(coinOf).filter(Boolean)])];
 async function marketConditions() {
-  const [btc, eth] = await Promise.all([coinState('BTC-USD'), coinState('ETH-USD')]);
-  const out = { 'BTC-USD': btc, 'ETH-USD': eth };
-  // crypto moves together: a shock in either coin blocks both
-  const own = { 'BTC-USD': btc.problems.filter(x => /sudden|spiking/.test(x)), 'ETH-USD': eth.problems.filter(x => /sudden|spiking/.test(x)) };
-  if (own['ETH-USD'].length) btc.problems.push(`ETH ${own['ETH-USD'][0]}`);
-  if (own['BTC-USD'].length) eth.problems.push(`BTC ${own['BTC-USD'][0]}`);
+  const coins = activeCoins();
+  const res = await Promise.allSettled(coins.map(c => coinState(c + '-USD')));
+  const out = {};
+  coins.forEach((c, i) => {
+    const p = c + '-USD';
+    out[p] = res[i].status === 'fulfilled' ? res[i].value
+      : { product: p, spot: NaN, sig: NaN, sig15: 0, sig5h: 0, sources: [], r5: 0, r15: 0, z5: 0, z15: 0, ageSec: 0, problems: ['price data missing'] };
+  });
+  // crypto moves together: a shock in BTC or ETH blocks every coin; a smaller coin's own shock blocks only that coin
+  const own = {}; for (const l of ['BTC', 'ETH']) own[l] = (out[l + '-USD'] ? out[l + '-USD'].problems : []).filter(x => /sudden|spiking/.test(x)); // read before cross-adding
+  for (const leader of ['BTC', 'ETH']) {
+    const sh = own[leader]; if (!sh.length) continue;
+    for (const p of Object.keys(out)) if (p !== leader + '-USD') out[p].problems.push(`${leader} ${sh[0]}`);
+  }
   return out;
 }
+const otherOf = (cond, product) => cond[product === 'BTC-USD' ? 'ETH-USD' : 'BTC-USD'] || cond[product]; // BTC is compared with ETH, everything else with BTC
 const pct = x => Math.abs(x) < 5e-5 ? '0.00%' : (x > 0 ? '+' : '−') + Math.abs(x * 100).toFixed(2) + '%';
 function condLine(st, other) {
   const regime = st.sig15 > 1.5 * st.sig5h ? 'choppy' : st.sig15 < 0.6 * st.sig5h ? 'quiet' : 'normal';
@@ -486,6 +547,17 @@ async function windowRecap() {
   for (const [k] of done) delete S.win[k];
   await say(`⏱ WINDOW RECAP\n${lines.join('\n')}`);
 }
+// daily markets settle at 5 PM ET; the same Kalshi series also runs one event every hour
+const etHour = iso => { const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(iso)).map(x => [x.type, x.value])); return [+p.hour, +p.minute]; };
+const isDailyClose = iso => { const [h, mi] = etHour(iso); return h === 17 && mi === 0; };
+const laneOf = (eventTicker, closeIso) => { const ser = String(eventTicker).split('-')[0]; return `${coinOf(ser)}|${isFast(ser) ? 'm15' : isDailyClose(closeIso) ? 'd1' : 'h1'}`; };
+const laneName = k => { const [c, t] = k.split('|'); return `${c} ${{ m15: '15-min', h1: 'hourly', d1: 'daily' }[t] || t}`; };
+const laneState = k => (S.lanes[k] = S.lanes[k] || { r: [], bar: 0, bench: 0 });
+const laneBar = k => CFG.LEARN === 1 ? (laneState(k).bar || 0) : 0;
+const laneBenched = k => CFG.LEARN === 1 && Date.now() < (laneState(k).bench || 0);
+// money already sitting in open auto positions (not yet settled)
+const openCost = () => (S.led.auto || []).filter(x => !x.done && Date.now() < x.c + 30 * 60e3).reduce((a, x) => a + (x.cost || 0), 0);
+S.emptyUntil = {};
 async function scan(fast) {
   if (!KEY_ID || !SIGN_KEY || !OWNER) return;
   if (S.paused) return;
@@ -500,13 +572,23 @@ async function scan(fast) {
 
   const evp = eventPause();
   if (!!evp !== !!S.evpOn) { S.evpOn = evp; await say(evp ? `⏸📅 Trading paused — ${evp}. Resumes automatically.` : '▶️ Event pause over — trading resumed.'); }
-  const cond = await marketConditions(), cands = [];
+  const lane = CFG.SERIES.filter(x => isFast(x) === !!fast && !(S.emptyUntil[x] > Date.now()));
+  const [cond, lists] = await Promise.all([marketConditions(), Promise.all(lane.map(x => pageAll(`/markets?series_ticker=${x}&status=open`, 'markets').catch(e => { log('markets failed', x, e.message); return null; })))]);
+  const cands = [];
   S.lastCond = cond;
-  for (const series of CFG.SERIES.filter(x => isFast(x) === !!fast)) {
+  for (const [si, series] of lane.entries()) {
     const product = CFG.SPOT[series]; if (!product || !cond[product]) continue;
-    const lo = isFast(series) ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES, hi = isFast(series) ? CFG.FAST_MAX_MINUTES : CFG.MAX_MINUTES;
-    const markets = await pageAll(`/markets?series_ticker=${series}&status=open`, 'markets');
+    const markets = lists[si]; if (!markets) continue;
     if (!S.seen[series]) { S.seen[series] = 1; log('SERIES', series, 'open markets:', markets.length); }
+    S.emptyN = S.emptyN || {};
+    if (!markets.length) { // Kalshi has nothing open here: after 5 empty looks, check less often (never for BTC/ETH)
+      S.emptyN[series] = (S.emptyN[series] || 0) + 1;
+      if (S.emptyN[series] >= 5 && !/^KX(BTC|ETH)/.test(series)) { S.emptyN[series] = 0; S.emptyUntil[series] = Date.now() + (fast ? 1 : 5) * 60e3; }
+      continue;
+    }
+    S.emptyN[series] = 0;
+    const lo = isFast(series) ? CFG.FAST_MIN_MINUTES : CFG.MIN_MINUTES, hi = isFast(series) ? CFG.FAST_MAX_MINUTES : CFG.MAX_MINUTES;
+    const inWindow = (m, mins) => (mins >= lo && mins <= hi) || (!isFast(series) && CFG.DAILY === 1 && mins >= lo && mins <= 1440 && isDailyClose(m.close_time));
     S.blk = S.blk || {};
     const blocked = cond[product].problems.length > 0, coinName = product.split('-')[0];
     const prev = S.blk[product];
@@ -519,14 +601,16 @@ async function scan(fast) {
       S.blk[product] = { on: false, t: prev.t };
     }
     if (cond[product].problems.length && isFast(series)) S.stats.last15[series] = { blocked: cond[product].problems.join('; '), at: Date.now() };
-    if (cond[product].problems.length) for (const m of markets) { const mins = (Date.parse(m.close_time) - now) / 60000; if (mins >= lo && mins <= hi) { const W1 = S.win[m.event_ticker] || (S.win[m.event_ticker] = { label: label(m.ticker).replace(/ ≥ \$[\d,.]+/, ''), series, close: Date.parse(m.close_time), best: null }); W1.blocked = cond[product].problems[0]; } }
+    if (cond[product].problems.length) for (const m of markets) { const mins = (Date.parse(m.close_time) - now) / 60000; if (inWindow(m, mins)) { const W1 = S.win[m.event_ticker] || (S.win[m.event_ticker] = { label: label(m.ticker).replace(/ ≥ \$[\d,.]+/, ''), series, close: Date.parse(m.close_time), best: null }); W1.blocked = cond[product].problems[0]; } }
     if (cond[product].problems.length) { if (env.BOT_DEBUG === '1') log('COND', product, cond[product].problems.join('; '));
       if (!S.condWarn || Date.now() - S.condWarn > 15 * 60e3) { S.condWarn = Date.now(); log('CONDITIONS BLOCK', product, cond[product].problems.join('; ')); } continue; }
     for (const m of markets) if (S.win[m.event_ticker]) S.win[m.event_ticker].close = Date.parse(m.close_time); // keep recap timing in sync with Kalshi
     for (let m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
-      if (!(mins >= lo && mins <= hi)) continue;
+      if (!inWindow(m, mins)) continue;
       const W0 = S.win[m.event_ticker] || (S.win[m.event_ticker] = { label: label(m.ticker).replace(/ ≥ \$[\d,.]+/, ''), series, close: Date.parse(m.close_time), best: null });
+      const lk = laneOf(m.event_ticker, m.close_time);
+      if (laneBenched(lk)) { W0.blocked = W0.blocked || `🧠 ${laneName(lk)} benched — losing lately, self-learning sits it out until ${timeCT(new Date(laneState(lk).bench).toISOString())}`; continue; }
       if (a.held.has(m.event_ticker) || S.sc.ev[m.event_ticker]) { W0.traded = W0.traded || true; if (isFast(series)) S.stats.last15[series] = { t: m.ticker, done: true, mins, at: Date.now() }; continue; } // ONE trade per window
       if (isFast(series)) {
         try { m = await withLiveQuote(m); } catch (e) { log('orderbook failed', m.ticker, e.message); }
@@ -537,9 +621,9 @@ async function scan(fast) {
       for (const v of verdicts) {
         if (env.BOT_DEBUG === '1') log('EVAL', m.ticker, v.side, JSON.stringify({ raw: v.raw, mkt: v.mkt, p: v.p, ask: v.ask, edge: v.edge, reasons: v.reasons }));
         if (!W0.best || v.edge > W0.best.edge) W0.best = { edge: v.edge, side: v.side, reasons: v.reasons.slice(0, 2) };
-        if (!W0.bestV || v.edge > W0.bestV.edge) W0.bestV = { ...v, m, product, at: now, cond: condLine(cond[product], cond[product === 'BTC-USD' ? 'ETH-USD' : 'BTC-USD']) };
+        if (!W0.bestV || v.edge > W0.bestV.edge) W0.bestV = { ...v, m, product, at: now, cond: condLine(cond[product], otherOf(cond, product)) };
       }
-      for (const v of verdicts) if (v.ok) cands.push({ m, product, ...v, cond: condLine(cond[product], cond[product === 'BTC-USD' ? 'ETH-USD' : 'BTC-USD']) });
+      for (const v of verdicts) if (v.ok) cands.push({ m, product, ...v, cond: condLine(cond[product], otherOf(cond, product)) });
     }
   }
   for (const [k, v] of Object.entries(S.sc.ev)) if (v < Date.now() - 60e3) delete S.sc.ev[k];
@@ -549,6 +633,7 @@ async function scan(fast) {
     for (const [ev, w] of Object.entries(S.win)) {
       const v = w.bestV; if (!v || have.has(ev) || w.traded || isFast(w.series) !== !!fast || Date.now() - v.at > 30e3) continue;
       if (a.held.has(ev) || S.sc.ev[ev]) continue;
+      if (laneBar(laneOf(ev, v.m.close_time)) > 0) continue; // self-learning: this market type lost lately, so only real edges count
       const blockers = v.reasons.filter(r => !/^edge .* below/.test(r) && !/^price .* outside/.test(r));
       if (blockers.length || !(v.ask >= 0.10 && v.ask <= 0.90) || v.edge < CFG.ALWAYS_EDGE / 100) continue;
       cands.push({ ...v, always: true });
@@ -564,6 +649,8 @@ async function scan(fast) {
     const autoFast = fastSeries && CFG.AUTO_FAST === 1 && !S.led.fastOff;
     const autoHour = !fastSeries && CFG.AUTO_HOURLY === 1 && !S.led.fastOff;
     const auto = S.unlocked || autoFast || autoHour;
+    if (!auto && S.led.fastOff) continue; // loss stop hit: stay quiet until tomorrow (no tap alerts either)
+    const bar = laneBar(laneOf(c.m.event_ticker, c.m.close_time));
     let limit = null;
     if ((autoFast || autoHour) && !S.unlocked) {
       if (!c.m._live) { // hourly list prices can lag: re-price from the live book before trading
@@ -573,7 +660,7 @@ async function scan(fast) {
           if (blocked) continue; Object.assign(c, v, { m: live });
         } catch (e) { continue; }
       }
-      if (!c.always && c.edge < CFG.AUTO_EDGE) continue;          // full-size auto needs the bigger edge
+      if (!c.always && c.edge < CFG.AUTO_EDGE + bar) continue;    // full-size auto needs the bigger edge (+ whatever this market type has to earn back)
       limit = c.always ? bestLimit(c.p, c.ask, CFG.ALWAYS_EDGE / 100, fastSeries ? CFG.AUTO_GRACE : 0.02) : bestLimit(c.p, c.ask, CFG.AUTO_EDGE / 2, fastSeries ? CFG.AUTO_GRACE : 0.02);
       if (limit === null) continue;
     } else if (auto) {
@@ -582,7 +669,9 @@ async function scan(fast) {
     // size within: per-trade cap, today's remaining budget, AND the cash actually in the wallet (fees + slippage included)
     const worst = limit || Math.min(c.ask + CFG.MAX_SLIPPAGE, 0.99);
     const fastLeft = autoFast && !S.unlocked && CFG.FAST_DAY > 0 ? CFG.FAST_DAY - (S.led.fast || 0) : Infinity;
-    const budget = Math.min(a.tradeCap, remaining, a.cash - Math.max(CFG.RESERVE, 0.02), fastLeft, c.always ? Math.max(0.5, a.cash * CFG.ALWAYS_PCT) : Infinity);
+    const oc = a.exposure !== null && a.exposure !== undefined ? a.exposure : openCost(), room = CFG.MAX_OPEN_PCT * (a.cash + oc) - oc; // never tie up more than MAX_OPEN_PCT of the money at once
+    if (auto && room < 0.15 && a.cash - CFG.RESERVE >= 0.5) { if (Date.now() - (S.roomWarned || 0) > 60 * 60e3) { S.roomWarned = Date.now(); log('exposure cap', money(oc), 'open'); } continue; }
+    const budget = Math.min(a.tradeCap, remaining, a.cash - Math.max(CFG.RESERVE, 0.02), fastLeft, auto ? Math.max(room, 0) : Infinity, c.always ? Math.max(0.5, a.cash * CFG.ALWAYS_PCT) : Infinity);
     let count = Math.floor(budget / worst);
     while (count > 0 && count * worst + feeTotal(count, worst) > budget) count--;
     if (auto) { const depth = bookDepth(c.m, c.side, worst); if (depth < count) count = Math.floor(depth); if (count < 1 && c.m._book) { log('no liquidity', c.m.ticker, c.side, worst); continue; } }
@@ -608,15 +697,16 @@ async function scan(fast) {
           await new Promise(res => setTimeout(res, 700));
           let live; try { live = await withLiveQuote(c.m); } catch (e) { break; }
           const v = evaluate(live, S.lastCond[c.product]).find(x => x.side === c.side);
-          if (!v || v.reasons.some(x => !/^edge .* below/.test(x)) || v.edge < CFG.MIN_EDGE) { log('retry stop', c.m.ticker, v && v.edge); break; }
-          const lim = bestLimit(v.p, v.ask, CFG.AUTO_EDGE / 2, CFG.AUTO_GRACE); if (lim === null) break;
+          const need = c.always ? CFG.ALWAYS_EDGE / 100 : CFG.MIN_EDGE;
+          if (!v || v.reasons.some(x => !/^edge .* below/.test(x) && !(c.always && /^price .* outside/.test(x))) || v.edge < need) { log('retry stop', c.m.ticker, v && v.edge); break; }
+          const lim = bestLimit(v.p, v.ask, c.always ? need : CFG.AUTO_EDGE / 2, CFG.AUTO_GRACE); if (lim === null) break;
           let n = Math.min(count, Math.floor(bookDepth(live, c.side, lim)));
           while (n > 0 && n * lim + feeTotal(n, lim) > budget) n--;
           if (n < 1) break;
           log('retry', k, c.m.ticker, lim, n);
           r = await placeBuy({ ticker: c.m.ticker, side: c.side, count: n, price: lim, auto: true });
         }
-        remaining -= r.total; a.cash -= r.total; acctCache = null;
+        remaining -= r.total; a.cash -= r.total; if (a.exposure !== null && a.exposure !== undefined) a.exposure += r.total; acctCache = null;
         if (r.filled > 0) {
           if (S.win[c.m.event_ticker]) S.win[c.m.event_ticker].traded = { side: c.side, px: r.px, n: r.filled };
           if (fastSeries) S.led.fast = (S.led.fast || 0) + r.total;
@@ -648,8 +738,9 @@ async function scan(fast) {
 async function applySetting(name, raw) {
   name = String(name || '').toLowerCase();
   if (name === 'coins') {
-    const list = String(raw || '').toUpperCase().split(',').flatMap(c => COIN_SERIES[c.trim()] || []);
-    if (!list.length) return 'Usage: /set coins btc,eth,sol';
+    const list = /^all$/i.test(String(raw || '').trim()) ? ALL_SERIES.slice() : String(raw || '').toUpperCase().split(',').flatMap(c => COIN_SERIES[c.trim()] || []);
+    if (!list.length) return `Usage: /set coins all  or  /set coins btc,eth,sol\nCoins: ${COINS.join(', ')}`;
+    for (const x of list) delete S.emptyUntil[x];
     CFG.SERIES = list; await saveSettings(); return '✅ coins = ' + String(raw).toUpperCase();
   }
   const x = SETTINGS[name]; let v = Number(String(raw ?? '').replace(/[$%¢]/g, ''));
@@ -863,11 +954,13 @@ async function onUpdate(u) {
   if (t.startsWith('/scan')) { await say('🔎 Scanning now…'); await tick(false, true); return say(S.lastError ? '⚠️ ' + S.lastError : '✅ Scan done. No alert = no good trade right now.'); }
   if (t.startsWith('/stats')) {
     const c = S.sc, n = c.n;
-    if (!n) return say(`📈 Scorecard: no alerts settled yet (${c.open.length} waiting). Each alert is scored after its market closes, whether or not you bought it.`);
-    return say(`📈 Scorecard (every alert, 1 contract each)\nSettled: ${n} · waiting: ${c.open.length}\nBot predicted wins: ${(c.sumP / n * 100).toFixed(0)}% · actual: ${(c.wins / n * 100).toFixed(0)}%\nPaper profit: ${c.pnl >= 0 ? '+' : '−'}${money(Math.abs(c.pnl))} (${(c.pnl / n * 100).toFixed(1)}¢ per alert)\nAccuracy score (Brier, lower is better): ${(c.brier / n).toFixed(3)}\n${n < 50 ? 'Under 50 results is mostly luck — judge it after 50+.' : ''}`);
+    if (!n) return say(`📈 Scorecard: no alerts settled yet (${c.open.length} waiting). Each alert is scored after its market closes, whether or not you bought it.\n\n` + lanesText());
+    return say(lanesText() + `\n\n📈 Scorecard (every alert, 1 contract each)\nSettled: ${n} · waiting: ${c.open.length}\nBot predicted wins: ${(c.sumP / n * 100).toFixed(0)}% · actual: ${(c.wins / n * 100).toFixed(0)}%\nPaper profit: ${c.pnl >= 0 ? '+' : '−'}${money(Math.abs(c.pnl))} (${(c.pnl / n * 100).toFixed(1)}¢ per alert)\nAccuracy score (Brier, lower is better): ${(c.brier / n).toFixed(3)}\n${n < 50 ? 'Under 50 results is mostly luck — judge it after 50+.' : ''}`);
   }
-  if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins btc,eth,sol');
-  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/news – market-moving headlines + pauses\n/research – what the self-test learned\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol');
+  if (t.startsWith('/coins')) return coverageReport();
+  if (t.startsWith('/learn')) return say(lanesText());
+  if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins all  (or btc,eth,sol,…)');
+  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/news – market-moving headlines + pauses\n/research – what the self-test learned\n/coins – which coins & markets are live\n/learn – self-learning results per market\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol,xrp,doge,bnb,hype,near,zec (or all)');
   if (t.startsWith('/set')) { const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
   if (t.startsWith('/rollback')) return rollback();
   if (t.startsWith('/claude') || !t.startsWith('/')) {
@@ -904,7 +997,7 @@ http.createServer((rq, rs) => {
     { command: 'claude', description: 'Talk to Claude / ask for changes' }, { command: 'status', description: 'Money, profit & mode' },
     { command: 'stats', description: 'Prediction scorecard' }, { command: 'settings', description: 'See all settings' }, { command: 'set', description: 'Change a setting: /set trade 3' },
     { command: 'scan', description: 'Scan for trades now' }, { command: 'pause', description: 'Stop trading' }, { command: 'resume', description: 'Start again' },
-    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'report', description: 'Today: trades, wins, losses, P&L' }, { command: 'news', description: 'Market-moving news + pauses' }, { command: 'research', description: 'What the self-test learned' }, { command: 'why', description: 'Why it is/isn\'t trading 15-min now' }, { command: 'rollback', description: 'Undo last code change' },
+    { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'report', description: 'Today: trades, wins, losses, P&L' }, { command: 'news', description: 'Market-moving news + pauses' }, { command: 'research', description: 'What the self-test learned' }, { command: 'coins', description: 'Which coins/markets are live' }, { command: 'learn', description: 'Self-learning results per market' }, { command: 'why', description: 'Why it is/isn\'t trading 15-min now' }, { command: 'rollback', description: 'Undo last code change' },
     { command: 'help', description: 'All commands' }] });
   await loadSettings(); schedule();
   try { const me = await tg('getMe', {}); log('SELFCHECK telegram', me.ok ? 'OK @' + me.result.username : 'FAILED'); } catch (e) { log('SELFCHECK telegram FAILED', e.message); }
@@ -928,7 +1021,26 @@ http.createServer((rq, rs) => {
     } catch (e) { log('ORDERTEST FAILED', e.message); }
   }
   if (OWNER) say(`🟢 Bot running (version ${VERSION}). Send /help anytime.`);
+  if (env.BOT_TEST !== '1') setTimeout(() => coverageReport().catch(e => log('coverage failed', e.message)), 25e3);
 });
+
+// Which coins and market types are live on Kalshi right now, and where prices come from. Sent at startup and by /coins.
+async function coverageReport() {
+  try { const r = await kalshi('GET', '/series?category=Crypto'); log('CRYPTO SERIES', (r.series || []).map(x => `${x.ticker}(${x.frequency || '?'})`).join(' ')); } catch (e) { log('series list failed', e.message); }
+  const cond = await marketConditions(), now = Date.now(), lines = [];
+  for (const c of activeCoins()) {
+    const parts = [];
+    for (const ser of [`KX${c}15M`, `KX${c}D`].filter(x => CFG.SERIES.includes(x))) {
+      let ms = []; try { ms = await pageAll(`/markets?series_ticker=${ser}&status=open`, 'markets'); } catch (e) {}
+      if (isFast(ser)) parts.push(`15-min ${ms.length ? '✅' : '—'}`);
+      else { const evs = new Set(ms.map(m => m.event_ticker)), daily = ms.some(m => isDailyClose(m.close_time) && Date.parse(m.close_time) - now < 1440 * 60e3);
+        parts.push(`hourly ${evs.size ? '✅' : '—'}`, `daily ${daily ? '✅' : '—'}`); }
+    }
+    const st = cond[c + '-USD'], src = st ? st.sources.length : 0;
+    lines.push(`${src >= 2 && !(st.problems || []).some(x => /missing|only/.test(x)) ? '🟢' : '🟡'} ${c}: ${parts.join(' · ') || 'not selected'} · 💱 ${src} price feeds`);
+  }
+  await say(`🪙 COVERAGE (all auto, self-learning on)\n${lines.join('\n')}\n— = Kalshi has no open market of that type right now; the bot checks again automatically.`);
+}
 
 // one-time helper: a key copied by hand can have look-alike characters (l/I/1, O/0). Try those swaps.
 async function repairKey() {
@@ -953,6 +1065,26 @@ async function repairKey() {
   SIGN_KEY = original; log('KEYREPAIR no match');
 }
 
+// Self-learning from REAL results: every market type (coin x 15-min / hourly / daily) keeps its last 12 trades.
+// Losing types must show a bigger edge before trading again (and stop always-in); badly losing types sit out 6h.
+// Winning types earn their normal bar back. Changes are reported to Telegram.
+async function learnLane(k, pnl, cost) {
+  const L = laneState(k); L.r = (L.r || []).concat(Math.round(pnl * 100) / 100).slice(-12);
+  const n = L.r.length, sum = L.r.reduce((x, y) => x + y, 0), wins = L.r.filter(x => x > 0).length, before = { bar: L.bar || 0, bench: L.bench || 0 };
+  if (CFG.LEARN !== 1) return;
+  if (n >= 6 && sum < 0) L.bar = Math.min(0.06, Math.round(((L.bar || 0) + 0.01) * 100) / 100);
+  else if (n >= 6 && sum > 0) L.bar = Math.max(0, Math.round(((L.bar || 0) - 0.01) * 100) / 100);
+  if (n >= 8 && sum < 0 && wins / n < 0.34 && !(Date.now() < (L.bench || 0))) { L.bench = Date.now() + 6 * 3600e3; L.r = L.r.slice(-4); } // fresh start after the break
+  const tot = `last ${n}: ${wins}W·${n - wins}L ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))}`;
+  if ((L.bench || 0) > before.bench) await say(`🧠 SELF-LEARNING · ${laneName(k)} benched 6h — ${tot}. Other markets keep trading.`);
+  else if (L.bar > before.bar) await say(`🧠 SELF-LEARNING · ${laneName(k)} losing (${tot}) → now needs +${Math.round(L.bar * 100)}¢ extra edge, always-in off for it.`);
+  else if (L.bar < before.bar) await say(`🧠 SELF-LEARNING · ${laneName(k)} winning (${tot}) → extra edge eased to +${Math.round(L.bar * 100)}¢${L.bar === 0 ? ', back to normal (always-in on)' : ''}.`);
+}
+function lanesText() {
+  const ks = Object.keys(S.lanes || {}).filter(k => (S.lanes[k].r || []).length || S.lanes[k].bar || S.lanes[k].bench); if (!ks.length) return '🧠 Self-learning: no settled auto trades yet.';
+  return '🧠 Self-learning by market:\n' + ks.sort().map(k => { const L = S.lanes[k], n = L.r.length, sum = L.r.reduce((x, y) => x + y, 0), w = L.r.filter(x => x > 0).length;
+    return `${Date.now() < (L.bench || 0) ? '⏸' : L.bar > 0 ? '⚠️' : '✅'} ${laneName(k)}: ${w}W·${n - w}L ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))}${L.bar ? ` · +${Math.round(L.bar * 100)}¢ bar` : ''}${Date.now() < (L.bench || 0) ? ` · benched till ${timeCT(new Date(L.bench).toISOString())}` : ''}`; }).join('\n');
+}
 async function gradeAutoTrades() {
   let changed = false;
   for (const o of (S.led.auto || []).filter(x => !x.done && Date.now() > x.c + 3 * 60e3)) {
@@ -963,6 +1095,7 @@ async function gradeAutoTrades() {
     o.done = 1; o.pnl = Math.round(pnl * 100) / 100; changed = true;
     S.led.autoPnl = Math.round(((S.led.autoPnl || 0) + pnl) * 100) / 100;
     S.led.streak = win ? 0 : (S.led.streak || 0) + 1;
+    await learnLane(laneOf(o.t.split('-').slice(0, -1).join('-'), new Date(o.c).toISOString()), o.pnl, o.cost);
     const maxLoss = CFG.FAST_MAX_LOSS > 0 ? CFG.FAST_MAX_LOSS : Math.max(1, 0.4 * (S.led.startCash || 5));
     if (!S.led.fastOff && (S.led.autoPnl <= -maxLoss || S.led.streak >= CFG.FAST_STREAK)) {
       S.led.fastOff = true;
@@ -1020,9 +1153,10 @@ if (env.BOT_TEST !== '1') { // tests drive scans manually
 // ---------- research + news (run in the background, automatically) ----------
 async function runResearch() {
   try {
-    const r = await research.run(req);
-    const lines = ['🧪 RESEARCH UPDATE (last 72h of BTC/ETH, tested on unseen data)'];
-    for (const coin of ['BTC', 'ETH']) for (const [key, name] of [['m15', '15-min'], ['h1', 'hourly']]) {
+    const coins = activeCoins();
+    const r = await research.run(req, coins);
+    const lines = [`🧪 RESEARCH UPDATE (last 72h of ${coins.join('/')}, tested on unseen data)`];
+    for (const coin of coins) for (const [key, name] of [['m15', '15-min'], ['h1', 'hourly']]) {
       const f = r[coin] && r[coin][key]; if (!f || !f.ok) { lines.push(`${coin} ${name}: not enough data`); continue; }
       const pattern = f.k > 0 ? `📈 momentum (k +${f.k})` : f.k < 0 ? `🔄 snap-back (k ${f.k})` : 'no direction pattern';
       lines.push(`${coin} ${name}: ${pattern} · swing scale ×${f.mult} → ${f.adopt ? `✅ adopted (+${(f.gain * 100).toFixed(1)}% accuracy)` : `➖ not proven (${(f.gain * 100).toFixed(1)}%), keeping baseline`}`);

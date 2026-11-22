@@ -34,7 +34,7 @@ W.settlements = [
   const send = t => post({ message: { chat: { id: 42 }, text: t } });
   console.log('\nRestart persistence');
   await send('/settings'); await wait(300);
-  const st = msgs().find(m => /Current settings/.test(m)) || ''; ok(/edge = 0.05/.test(st) && /trade = 3/.test(st) && /day = 20/.test(st) && /markets = KXBTCD$/m.test(st), 'custom settings restored', st);
+  const st = msgs().find(m => /Current settings/.test(m)) || ''; ok(/edge = 0.05/.test(st) && /trade = 3/.test(st) && /day = 20/.test(st) && /markets = KXBTCD, KXBTC15M, KXETHD/m.test(st) && /KXZEC15M$/m.test(st), 'custom settings restored (+ every coin added once on upgrade)', st);
   await send('/status'); await wait(500);
   ok(/Today: \$6\.50 of \$20\.00/.test(last()), "today's spending restored (fees + NO buys kept)", last());
   await send('/auto'); await send('/lock'); await wait(300);

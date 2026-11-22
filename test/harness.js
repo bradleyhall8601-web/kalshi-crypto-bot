@@ -8,7 +8,7 @@ const W = global.W = {
   markets: {},          // ticker -> market
   fills: [], settlements: [], positions: [],
   orders: [], transfers: [], tg: [],
-  btc: 60000, eth: 1680, vol: 0.0005, // per-minute vol used to generate candles
+  btc: 60000, eth: 1680, sol: 140, xrp: 2.1, doge: 0.31, bnb: 610, hype: 38, near: 5.2, zec: 52, vol: 0.0005, // per-minute vol used to generate candles
   candleLag: 30,        // seconds since newest candle start
   stale: {},            // exchange -> true to return old timestamp
   down: {},             // exchange -> true to fail
@@ -18,6 +18,8 @@ const W = global.W = {
   pinned: null,         // pinned settings text
   orderFill: 'full',    // 'full' | 'none'
   msgId: 100, pinnedId: 9,
+  unlisted: {},         // coin -> ['coinbase', ...] exchanges that don't list that coin
+  calls: {},            // exchange -> request count
 };
 
 const pubKeys = {};
@@ -52,7 +54,15 @@ global.fetch = async (url, o = {}) => {
     return { ok: true, status: 200, text: async () => `<rss><channel>${(W.rss || []).map(x => `<item><title><![CDATA[${x.title}]]></title><link>https://x/${encodeURIComponent(x.title)}</link><pubDate>${new Date(x.at || Date.now()).toUTCString()}</pubDate></item>`).join('')}</channel></rss>` };
   }
   // ---- Exchanges ----
-  const coinOf = s => (/eth/i.test(s) ? 'eth' : 'btc');
+  const coinOf = s => { const m = String(s).toLowerCase().match(/(btc|xbt|eth|sol|xrp|doge|xdg|bnb|hype|near|zec)/); const c = m ? m[1] : 'btc'; return { xbt: 'btc', xdg: 'doge' }[c] || c; };
+  if (u.includes('api.hyperliquid.xyz')) {
+    if (W.down.hyperliquid) return J({}, 500);
+    if (b && b.type === 'allMids') return J(Object.fromEntries(['btc', 'eth', 'sol', 'xrp', 'doge', 'bnb', 'hype', 'near', 'zec'].map(c => [c.toUpperCase(), String(W[c] * (W.shock && W.shock.coin === c ? 1 + W.shock.pct : 1))])));
+    if (b && b.type === 'candleSnapshot') { const c = b.req.coin.toLowerCase(); return J(genCandles(W[c], W.vol, 0).reverse().map(r => ({ t: r[0] * 1000, T: r[0] * 1000 + 59999, o: String(r[3]), c: String(r[4]), h: String(r[2]), l: String(r[1]), v: '1', n: 1 }))); }
+  }
+  const src = /coinbase/.test(u) ? 'coinbase' : /kraken/.test(u) ? 'kraken' : /bitstamp/.test(u) ? 'bitstamp' : /gemini/.test(u) ? 'gemini' : /hyperliquid/.test(u) ? 'hyperliquid' : '';
+  if (src) { W.calls[src] = (W.calls[src] || 0) + 1; (W.urls = W.urls || []).push(u); }
+  if (src && src !== 'hyperliquid' && (W.unlisted[coinOf(u)] || []).includes(src)) return src === 'kraken' ? J({ error: ['EQuery:Unknown asset pair'] }) : J({ message: 'NotFound' }, 404);
   if (u.includes('api.exchange.coinbase.com')) {
     const coin = coinOf(u), px = W[coin] * (W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1);
     if (W.down.coinbase) return J({}, 500);
@@ -80,13 +90,14 @@ global.fetch = async (url, o = {}) => {
     const ok = crypto.verify(null, Buffer.from(h['KALSHI-ACCESS-TIMESTAMP'] + o.method + path), pubKeys.kalshi, Buffer.from(h['KALSHI-ACCESS-SIGNATURE'], 'base64'));
     if (!ok) return J({ error: { code: 'authentication_error', details: 'INCORRECT_API_KEY_SIGNATURE' } }, 401);
     if (W.fail429 > 0) { W.fail429--; return J({ error: { code: 'too_many_requests' } }, 429); }
+    if (path.endsWith('/series')) return J({ series: ['BTC', 'ETH', 'SOL'].flatMap(c => [{ ticker: `KX${c}D`, frequency: 'hourly' }, { ticker: `KX${c}15M`, frequency: 'fifteen_min' }]) });
     if (path.endsWith('/portfolio/balance')) {
       const total = Object.values(W.shards).reduce((a, x) => a + x, 0);
       return J({ balance: Math.round(total * 100), balance_dollars: total.toFixed(4), portfolio_value: 0, balance_breakdown: Object.entries(W.shards).map(([k, v]) => ({ exchange_index: Number(k), balance: v.toFixed(4) })) });
     }
     if (path.endsWith('/portfolio/settlements')) return J({ settlements: W.settlements, cursor: '' });
     if (path.endsWith('/portfolio/fills')) return J({ fills: W.fills, cursor: '' });
-    if (path.endsWith('/portfolio/positions')) return J({ market_positions: W.positions });
+    if (path.endsWith('/portfolio/positions')) return J({ market_positions: W.positions.filter(p => W.markets[p.ticker] && W.markets[p.ticker].status !== 'settled') }); // settled positions drop off, like Kalshi
     if (path.endsWith('/intra_exchange_instance_transfer')) {
       if (W.transferFails) return J({ error: { code: 'forbidden', message: 'missing scope write::transfer' } }, 403);
       const amt = b.amount / 10000; W.transfers.push(b);
@@ -110,7 +121,7 @@ global.fetch = async (url, o = {}) => {
       if ((W.shards[idx] || 0) < count * pay + fee) return J({ error: { code: 'insufficient_balance', message: 'insufficient balance' } }, 400);
       W.shards[idx] -= count * pay + fee;
       W.fills.push({ ticker: b.ticker, side: 'yes', action: b.side === 'bid' ? 'buy' : 'sell', count_fp: count.toFixed(2), yes_price_dollars: fillYes.toFixed(4), no_price_dollars: (1 - fillYes).toFixed(4), fee_cost: fee.toFixed(4) });
-      W.positions.push({ ticker: b.ticker, position: b.side === 'bid' ? count : -count });
+      W.positions.push({ ticker: b.ticker, position: b.side === 'bid' ? count : -count, market_exposure_dollars: (count * pay).toFixed(4) });
       return J({ order_id: 'o' + W.orders.length, fill_count: count.toFixed(2), remaining_count: '0.00', average_fill_price: fillYes.toFixed(4), average_fee_paid: (fee / count).toFixed(4), ts_ms: 1 }, 201);
     }
     const ob = path.match(/\/markets\/([^/]+)\/orderbook$/);

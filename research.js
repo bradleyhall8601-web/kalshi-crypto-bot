@@ -1,4 +1,4 @@
-// Self-testing research: replays recent BTC/ETH history through the bot's model to learn,
+// Self-testing research: replays recent history of every traded coin through the bot's model to learn,
 // from real data, whether short-term moves continue (momentum) or snap back (mean reversion),
 // and how big price swings really are. Changes are adopted only if they also win on unseen data.
 'use strict';
@@ -53,6 +53,12 @@ function fit(samples) {
 
 // fetch ~3 days of 1-minute candles from Coinbase (300 per request)
 async function history(req, product, hours = 72) {
+  try { const c = await historyCoinbase(req, product, hours); if (c.length > 1000) return c; } catch (e) { /* coin not on Coinbase: use Hyperliquid */ }
+  const coin = product.split('-')[0], end = Math.floor(Date.now() / 60000) * 60000;
+  const rows = await req('https://api.hyperliquid.xyz/info', { method: 'POST', body: { type: 'candleSnapshot', req: { coin, interval: '1m', startTime: end - hours * 3600e3, endTime: end } } });
+  return (rows || []).map(k => ({ t: Math.floor(k.t / 1000), c: Number(k.c) })).filter(x => x.c > 0).sort((a, b) => a.t - b.t);
+}
+async function historyCoinbase(req, product, hours) {
   const end = Math.floor(Date.now() / 60000) * 60, H = { 'User-Agent': 'kalshi-bot' };
   const out = new Map();
   for (let s = end - hours * 3600; s < end; s += 300 * 60) {
@@ -64,10 +70,11 @@ async function history(req, product, hours = 72) {
   return [...out.entries()].sort((a, b) => a[0] - b[0]).map(([t, c]) => ({ t, c }));
 }
 
-async function run(req) {
+async function run(req, coins = ['BTC', 'ETH']) {
   const res = {};
-  for (const [coin, product] of [['BTC', 'BTC-USD'], ['ETH', 'ETH-USD']]) {
-    const c = await history(req, product);
+  for (const coin of coins) {
+    let c; try { c = await history(req, coin + '-USD'); } catch (e) { res[coin] = { m15: { ok: false, reason: 'no data' }, h1: { ok: false, reason: 'no data' }, minutes: 0 }; continue; }
+    if (c.length < 400) { res[coin] = { m15: { ok: false, reason: 'no data' }, h1: { ok: false, reason: 'no data' }, minutes: c.length }; continue; }
     res[coin] = {
       m15: fit(buildSamples(c, 15, [3, 5, 7, 9, 11, 13], 5)),   // 15-min windows, momentum over last 5 min
       h1: fit(buildSamples(c, 60, [10, 20, 30, 40, 50], 15)),   // hourly windows, last 15 min
