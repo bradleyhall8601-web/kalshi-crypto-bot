@@ -46,12 +46,28 @@ global.fetch = async (url, o = {}) => {
     if (method === 'getMe') return J({ ok: true, result: { username: 'test_bot' } });
     return J({ ok: true, result: { message_id: ++W.msgId } });
   }
+  // ---- News feeds (RSS) ----
+  if (/coindesk|cointelegraph|decrypt\.co|news\.google/.test(u)) {
+    if (W.down.news) return J({}, 500);
+    return { ok: true, status: 200, text: async () => `<rss><channel>${(W.rss || []).map(x => `<item><title><![CDATA[${x.title}]]></title><link>https://x/${encodeURIComponent(x.title)}</link><pubDate>${new Date(x.at || Date.now()).toUTCString()}</pubDate></item>`).join('')}</channel></rss>` };
+  }
   // ---- Exchanges ----
   const coinOf = s => (/eth/i.test(s) ? 'eth' : 'btc');
   if (u.includes('api.exchange.coinbase.com')) {
     const coin = coinOf(u), px = W[coin] * (W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1);
     if (W.down.coinbase) return J({}, 500);
-    if (u.includes('/candles')) return J(genCandles(W[coin], W.vol, 0));
+    if (u.includes('/candles')) {
+      const q = new URL(u).searchParams;
+      if (q.get('start')) { // historical range: deterministic random walk with optional planted momentum
+        const st = Math.floor(Date.parse(q.get('start')) / 1000 / 60) * 60, en = Math.floor(Date.parse(q.get('end')) / 1000 / 60) * 60, rows = [];
+        const z = i => { const h = Math.sin(i * 12.9898) * 43758.5453; return (h - Math.floor(h)) - 0.5; };
+        const origin = Math.floor(Date.now() / 60000) - 6000; // random walk from a fixed origin (no pattern)
+        let lp = 0; const lvl = new Map(); for (let i = origin; i <= en / 60; i++) { lp += z(i) * 0.0017; if (i >= st / 60) lvl.set(i, lp); }
+        for (let tt = en; tt >= st; tt -= 60) rows.push([tt, 0, 0, 0, W[coin] * Math.exp(lvl.get(tt / 60) || 0), 1]);
+        return J(rows);
+      }
+      return J(genCandles(W[coin], W.vol, 0));
+    }
     return J({ price: String(px), time: new Date(W.now() - (W.stale.coinbase ? 120e3 : 1000)).toISOString() });
   }
   if (u.includes('api.kraken.com')) { if (W.down.kraken) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ result: { X: { c: [String(W[coin] * sh * (W.krakenSkew || 1))] } } }); }

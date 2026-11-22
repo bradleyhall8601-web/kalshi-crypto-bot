@@ -188,7 +188,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   const m15 = market('KXBTC15M', 'btc', 9, 59980, -0.17, { m: { strike_type: 'greater_or_equal' } });
   let o0 = W.orders.length;
   await send(post, '/scan'); await wait(2500);
-  ok(W.orders.length === o0 + 1 && msgs().some(m => /🟢🤖 AUTO BUY · BTC 15-min/.test(m.text) && /🎟 \d+ NO \(⬇️ down\) @ [\d.]+¢ = \$\d\.\d\d \(fee \$0\.\d\d\)/.test(m.text)), 'auto buys a 15-min market with no tap, emoji receipt in Telegram');
+  ok(W.orders.length === o0 + 1 && msgs().some(m => /🟢🤖 AUTO BUY · BTC 15-min/.test(m.text) && /🎟 \d+ NO \(⬇️ down\) @ [\d.]+¢ = \$\d\.\d\d \(fee \$0\.\d\d\)/.test(m.text) && /🎯 Win chance \d+% · paid [\d.]+¢/.test(m.text) && /auto today \$\d\.\d\d \(no limit\)/.test(m.text)), 'auto buys a 15-min market with no tap, emoji receipt in Telegram');
   ok(!alerts().some(x => x.text.includes('59,980')), 'no tap alert for an auto-traded 15-min market');
   ok(msgs().some(m => /🔁 Moved \$\d\.\d\d .* shard 0 to shard 2/.test(m.text)), 'cash move between shards reported');
   const o15 = W.orders.slice(-1)[0];
@@ -307,6 +307,51 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   await send(post, '/scan'); await wait(2500);
   ok(W.orders.length === oh, 'no trade that would dip into the $1 reserve');
   await send(post, '/set auto1h 0'); await wait(200); W.shards = { 0: 7, 2: 0 }; clearMarkets();
+
+  console.log('\n11k. Window recap: every window reports traded or why not');
+  clearMarkets(); W.shards = { 0: 7, 2: 0 };
+  const wA = market('KXBTC15M', 'btc', 9, 59970, -0.17, { m: { strike_type: 'greater_or_equal' } });   // good edge -> trades
+  const wB = market('KXETH15M', 'eth', 9, 1679.9, -0.02, { m: { strike_type: 'greater_or_equal' } });  // tiny edge -> skip
+  await send(post, '/_fasttick'); await wait(2500);
+  wA.close_time = new Date(Date.now() - 20e3).toISOString(); wB.close_time = new Date(Date.now() - 20e3).toISOString();
+  await send(post, '/_fasttick'); await wait(1500);
+  clearMarkets();
+  const rc = msgs().filter(m => /⏱ WINDOW RECAP/.test(m.text)).slice(-1)[0];
+  console.log('   RECAP:', rc && JSON.stringify(rc.text)); ok(rc && /BTC 15-min.*✅ bought \d+ NO/.test(rc.text) && /ETH 15-min.*⏭ no edge — best edge/.test(rc.text), 'recap shows the trade and the skip reason', rc && rc.text);
+  const msgN = msgs().length; await send(post, '/_fasttick'); await wait(800);
+  ok(!msgs().slice(msgN).some(m => /WINDOW RECAP/.test(m.text)), 'each window recapped once');
+
+  console.log('\n11i. News watch');
+  W.rss = [{ title: 'Old headline: Bitcoin hits record high', at: Date.now() - 5 * 60e3 }];
+  let nm = msgs().length;
+  await send(post, '/_news'); await wait(800);
+  ok(msgs().length === nm, 'first news pass learns existing headlines without replaying them');
+  W.rss.push({ title: 'Major exchange Bybit hacked, withdrawals halted', at: Date.now() });
+  W.rss.push({ title: 'Small DeFi protocol exploited for $2M', at: Date.now() });
+  W.rss.push({ title: 'Fed unexpectedly cuts rates, Warsh signals more', at: Date.now() });
+  W.rss.push({ title: 'Local bakery wins award', at: Date.now() });
+  await send(post, '/_news'); await wait(800);
+  const nmsgs = msgs().slice(nm).map(m => m.text);
+  ok(nmsgs.some(m => /📰 NEWS/.test(m) && /🚨 Major exchange Bybit hacked.*paused 15 min/.test(m)), 'major hack reported and pauses trading 15 min');
+  ok(nmsgs.some(m => /⚠️ Small DeFi protocol exploited/.test(m) && !/exploited for \$2M — ⏸/.test(m)), 'minor DeFi hack reported without pausing');
+  ok(nmsgs.filter(m => /📰 NEWS/.test(m)).length === 1, 'headlines grouped into one message');
+  ok(nmsgs.some(m => /🏛 Fed unexpectedly cuts rates.*paused 10 min/.test(m)), 'Fed surprise reported and pauses 10 min');
+  ok(!nmsgs.some(m => /bakery/.test(m)), 'irrelevant headline ignored');
+  clearMarkets(); market('KXBTC15M', 'btc', 9, 59977, -0.17, { m: { strike_type: 'greater_or_equal' } }); let on = W.orders.length;
+  await send(post, '/_fasttick'); await wait(1500);
+  ok(W.orders.length === on && msgs().some(m => /⏸📅 Trading paused — news: Major exchange Bybit hacked/.test(m.text)), 'no trades during news pause, pause reported');
+  await send(post, '/news'); await wait(300);
+  ok(/News watch \(5\/5 sources live\)/.test(lastMsg().text) && /🚨 Major exchange Bybit hacked/.test(lastMsg().text), '/news lists headlines and status', lastMsg().text);
+  await send(post, '/_clearnewspause'); await wait(200); clearMarkets(); W.rss = [];
+
+  console.log('\n11j. Research engine runs and saves what it learned');
+  await send(post, '/_research'); await wait(15000);
+  const rm = msgs().find(m => /🧪 RESEARCH UPDATE/.test(m.text));
+  ok(rm && /BTC 15-min:/.test(rm.text) && /ETH hourly:/.test(rm.text), 'research report sent for BTC/ETH 15-min + hourly', rm && rm.text);
+  const lrn = JSON.parse(W.pinned.slice(W.pinned.indexOf('{'))).LRN || {};
+  ok(lrn.BTC && lrn.BTC.m15 && typeof lrn.BTC.m15.k === 'number', 'learned parameters saved (survive restarts)');
+  ok(lrn.BTC && lrn.BTC.m15 && lrn.BTC.m15.adopt === false, 'no pattern adopted from patternless data (no false discovery)', JSON.stringify(lrn.BTC && lrn.BTC.m15));
+  await send(post, '/research'); await wait(300); ok(/🧪 RESEARCH UPDATE/.test(lastMsg().text), '/research shows latest findings');
 
   console.log('\n12. Scorecard');
   const mS = market('KXETHD', 'eth', 30, 1678, 0.16);
