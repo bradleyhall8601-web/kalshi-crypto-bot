@@ -35,6 +35,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(W.tg.some(x => x.method === 'setMyCommands' && x.body.commands.some(c => c.command === 'stats')), 'command menu set');
   ok(msgs().some(m => /Bot running/.test(m.text)), 'startup message sent');
 
+  await post({ message: { chat: { id: 42 }, text: '/set auto1h 0' } }); await wait(200);
   console.log('\n2. Security');
   let r = await post({ message: { chat: { id: 42 }, text: '/status' } }, {});
   ok(r.status === 403, 'webhook without secret rejected (403)');
@@ -47,7 +48,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
 
   console.log('\n3. Commands');
   await send(post, '/help'); await wait(200); ok(/\/stats/.test(lastMsg().text) && /\/set/.test(lastMsg().text), '/help lists commands');
-  await send(post, '/settings'); await wait(200); ok(/edge = 0.04/.test(lastMsg().text) && /markets = KXBTCD/.test(lastMsg().text), '/settings shows values');
+  await send(post, '/settings'); await wait(200); ok(/edge = 0.04/.test(lastMsg().text) && /day = 0/.test(lastMsg().text) && /reserve = 1/.test(lastMsg().text) && /markets = KXBTCD/.test(lastMsg().text), '/settings shows values');
   await send(post, '/set trade 3'); await wait(200); ok(/trade: 2 → 3/.test(lastMsg().text), '/set trade 3 works');
   await send(post, '/set trade 99999'); await wait(200); ok(/must be between/.test(lastMsg().text), '/set rejects out-of-range');
   await send(post, '/set edge 6'); await wait(200); ok(/edge: 0.04 → 0.06/.test(lastMsg().text), '/set edge 6 means 6¢');
@@ -114,7 +115,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   W.shards = { 0: 0.10, 2: 0.10 }; // $0.20: less than one contract + fee
   await send(post, '/scan'); await wait(800);
   ok(!alerts().some(x => x.text.includes('60,045')), 'no alert when wallet cannot afford 1 contract');
-  ok(msgs().some(m => /Wallet is low/.test(m.text)), 'low-wallet warning sent once');
+  ok(msgs().filter(m => /💸 Wallet low/.test(m.text)).length === 1, 'low-wallet warning sent once (reserve protected)');
   W.shards = { 0: 7.0, 2: 0.0 };
   await tap(post, `b|${mW.ticker}|y|${Math.round(Number(mW.yes_ask_dollars) * 1000)}|5`); await wait(2000);
   // daily limit: force spend near cap via settings
@@ -122,7 +123,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   const mD = market('KXBTCD', 'btc', 40, 60042, 0.16);
   await tap(post, `b|${mD.ticker}|y|${Math.round(Number(mD.yes_ask_dollars) * 1000)}|5`); await wait(1500);
   ok(/Daily limit reached/.test(edits().slice(-1)[0] || ''), 'Buy blocked at daily limit');
-  await send(post, '/set day 15'); await wait(200);
+  await send(post, '/set day 0'); await wait(200);
   W.shards = { 0: 0.05, 2: 0.05 };
   const mC = market('KXBTCD', 'btc', 40, 60043, 0.16);
   await tap(post, `b|${mC.ticker}|y|${Math.round(Number(mC.yes_ask_dollars) * 1000)}|5`); await wait(1500);
@@ -201,13 +202,13 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(W.orders.length === o0 + 6, 'unfilled auto order: 3 quick retries per check, keeps trying while the window is open', W.orders.length - o0);
   ok(msgs().filter(m => /⏳ MISSED FILL/.test(m.text)).length === 1, '"missed fill" reported once, not spammed');
   W.orderFill = 'full'; clearMarkets();
-  await send(post, '/set fastday 0'); await wait(200);
+  await send(post, '/set fastday 0.1'); await wait(200);
   market('KXBTC15M', 'btc', 9, 59985, -0.17, { m: { strike_type: 'greater_or_equal' } }); o0 = W.orders.length;
   await send(post, '/scan'); await wait(1500);
   ok(W.orders.length === o0, 'auto 15-min stops at its daily budget');
-  await send(post, '/set fastday 10'); await wait(200); clearMarkets();
+  await send(post, '/set fastday 0'); await wait(200); clearMarkets();
   await send(post, '/status'); await wait(400);
-  ok(/Auto 15-min: ON · today \$\d\.\d\d\/\$10\.00/.test(lastMsg().text), '/status shows auto 15-min state and spend', lastMsg().text);
+  ok(/Auto 15-min: ON · today \$\d\.\d\d\/no limit/.test(lastMsg().text) && /Today: \$\d+\.\d\d of no limit/.test(lastMsg().text), '/status: auto state, no daily limit by default', lastMsg().text);
   await send(post, '/auto15 off'); await wait(200); ok(/Auto 15-min trading OFF/.test(lastMsg().text), '/auto15 off');
   market('KXBTC15M', 'btc', 9, 59990, -0.17, { m: { strike_type: 'greater_or_equal' } }); o0 = W.orders.length;
   await send(post, '/scan'); await wait(1200);
@@ -287,6 +288,25 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   await send(post, '/scan'); await wait(900);
   ok(msgs().some(m => /✅ BTC conditions clear again/.test(m.text)), 'all-clear reported');
   clearMarkets();
+
+  console.log('\n11h. Auto hourly markets (BTC & ETH) with live re-pricing');
+  clearMarkets(); W.shards = { 0: 7, 2: 0 };
+  await send(post, '/set auto1h 1'); await wait(200);
+  const mH = market('KXETHD', 'eth', 40, 1679.2, 0.17);
+  W.live = { [mH.ticker]: { ...mH } };
+  let oh = W.orders.length;
+  await send(post, '/scan'); await wait(3000);
+  ok(W.orders.length === oh + 1 && msgs().some(m => /🟢🤖 AUTO BUY · ETH hourly/.test(m.text)), 'hourly market auto-traded (no tap)');
+  const oH = W.orders.slice(-1)[0];
+  ok(Number(oH.count) * Number(oH.price) <= 7 * 0.25 + 0.001, 'trade size ≤ 25% of wallet', oH.count + ' @ ' + oH.price);
+  await send(post, '/scan'); await wait(2500);
+  ok(W.orders.length === oh + 1, 'one auto trade per hourly window');
+  // wallet protection: never trade into the reserve
+  clearMarkets(); W.live = null; W.shards = { 0: 1.2, 2: 0 };
+  market('KXBTCD', 'btc', 40, 60039, 0.17); oh = W.orders.length;
+  await send(post, '/scan'); await wait(2500);
+  ok(W.orders.length === oh, 'no trade that would dip into the $1 reserve');
+  await send(post, '/set auto1h 0'); await wait(200); W.shards = { 0: 7, 2: 0 }; clearMarkets();
 
   console.log('\n12. Scorecard');
   const mS = market('KXETHD', 'eth', 30, 1678, 0.16);

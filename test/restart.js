@@ -17,7 +17,7 @@ W.markets['KXBTCD-OLD-T60000'] = { ticker: 'KXBTCD-OLD-T60000', event_ticker: 'K
 W.markets['KXBTCD-SEEN-T60040'] = { ticker: 'KXBTCD-SEEN-T60040', event_ticker: 'KXBTCD-SEEN', status: 'open', close_time: new Date(openClose).toISOString(), floor_strike: 60040, strike_type: 'greater', yes_ask_dollars: '0.2600', yes_bid_dollars: '0.2400', no_ask_dollars: '0.7600', exchange_index: 2 };
 W.pinned = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify({
   MIN_EDGE: 0.05, SMALL_TRADE: 3, SMALL_DAY: 20, UNLOCK_PROFIT: 100, RELOCK_PROFIT: 50, SCALED_TRADE_PCT: 0.02, SCALED_DAY_PCT: 0.1, MIN_PRICE: 0.15, MAX_PRICE: 0.85,
-  MIN_MINUTES: 8, MAX_MINUTES: 70, MODEL_WEIGHT: 0.5, VOL_MULT: 1, MAX_ALERTS_PER_RUN: 2, SCAN_EVERY_MIN: 1, ALERT_TTL_MIN: 4, SERIES: ['KXBTCD'], manualLock: true, paused: false, v: 4,
+  MIN_MINUTES: 8, MAX_MINUTES: 70, MODEL_WEIGHT: 0.5, VOL_MULT: 1, MAX_ALERTS_PER_RUN: 2, SCAN_EVERY_MIN: 1, ALERT_TTL_MIN: 4, SERIES: ['KXBTCD'], manualLock: true, paused: false, v: 6, AUTO_HOURLY: 0, RESERVE: 1, TRADE_PCT: 0.25, AUTO_FAST: 1, FAST_DAY: 0, FAST_MAX_LOSS: 0,
   SC: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [{ t: 'KXBTCD-OLD-T60000', s: 'y', p: 0.6, a: 0.5, c: closedAgo }], ev: { 'KXBTCD-SEEN': openClose } },
   LED: { day: today, spent: 6.5, fast: 4, autoPnl: 0, streak: 0, fastOff: false, auto: [1, 2, 3, 4].map(i => ({ t: 'KXBTC15M-L' + i + '-00', s: 'y', n: 3, cost: 1.5, c: closedAgo })) },
   SETL: Date.now() - 60e3,
@@ -44,7 +44,7 @@ W.settlements = [
   ok(/Settled: 1/.test(last()) && /actual: 100%/.test(last()) && /Paper profit: \+\$0\.48/.test(last()), 'scorecard graded the settled alert', last());
   ok(msgs().some(m => /🏆 WIN \+\$15\.78 · BTC hourly ≥ \$60,000\.00 → YES/.test(m)), 'new settlement reported with profit');
   ok(!msgs().some(m => /KXBTCD-ANCIENT/.test(m)), 'old settlements not replayed after restart');
-  ok(msgs().some(m => /🛑 Auto 15-min trading stopped for today: 4 losses in a row/.test(m)), 'auto 15-min circuit breaker trips after 4 straight losses');
+  ok(msgs().some(m => /🛑 Auto trading stopped for today \(protecting your wallet\): (\d losses in a row|down \$\d)/.test(m)), 'auto circuit breaker trips (loss limit / losing streak)', msgs().filter(m => /stopped/.test(m)).join(' | '));
   await send('/status'); await wait(500);
   ok(/Auto 15-min: STOPPED for today/.test(last()) && /result −\$6\.00/.test(last()), '/status shows stopped + day result', last());
   const blob = JSON.parse(W.pinned.slice(W.pinned.indexOf('{')));
