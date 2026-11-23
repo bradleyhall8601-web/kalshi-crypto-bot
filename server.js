@@ -854,7 +854,10 @@ async function scan(fast) {
         latest[m.ticker + '|' + v.side] = v;
         if (CFG.MAKER === 1) { const mq = makerQuote(v); if (mq && (!W0.mk || mq.edge > W0.mk.edge)) W0.mk = { ...mq, v, m, product }; }
         if (env.BOT_DEBUG === '1') log('EVAL', m.ticker, v.side, JSON.stringify({ raw: v.raw, mkt: v.mkt, p: v.p, ask: v.ask, edge: v.edge, reasons: v.reasons }));
-        if (!W0.best || v.edge > W0.best.edge) W0.best = { edge: v.edge, side: v.side, reasons: v.reasons.slice(0, 2) };
+        { // recap reason: prefer moments when the price was tradable (40–85¢) over the decided tail of the window
+          const inRange = !v.reasons.some(r => /^price .* outside/.test(r)), b = W0.best;
+          if (!b || (inRange && !b.inRange) || (inRange === !!b.inRange && v.edge > b.edge)) W0.best = { edge: v.edge, side: v.side, reasons: v.reasons.slice(0, 2), inRange };
+        }
         if (!W0.bestV || v.edge > W0.bestV.edge) W0.bestV = { ...v, m, product, at: now, cond: condLine(cond[product], otherOf(cond, product)) };
       }
       for (const v of verdicts) if (v.ok) cands.push({ m, product, ...v, cond: condLine(cond[product], otherOf(cond, product)) });

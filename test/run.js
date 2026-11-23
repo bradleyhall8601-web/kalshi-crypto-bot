@@ -340,6 +340,15 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   clearMarkets();
   const rc = msgs().filter(m => /⏱ WINDOW RECAP/.test(m.text)).slice(-1)[0];
   console.log('   RECAP:', rc && JSON.stringify(rc.text)); ok(rc && /BTC 15-min.*✅ bought \d+ NO/.test(rc.text) && /ETH 15-min.*⏭ no edge — best edge/.test(rc.text), 'recap shows the trade and the skip reason', rc && rc.text);
+  // a window that was tradable early but decided late must report the early reason, not "price outside"
+  const wC = market('KXETH15M', 'eth', 9, 1679.9, -0.02, { m: { strike_type: 'greater_or_equal' } });   // tiny edge, in range
+  await send(post, '/_fasttick'); await wait(2500);
+  Object.assign(wC, { yes_ask_dollars: '0.0300', yes_bid_dollars: '0.0200', no_ask_dollars: '0.9800' });   // market decided: 3¢ / 98¢
+  await send(post, '/_fasttick'); await wait(2500);
+  wC.close_time = new Date(Date.now() - 20e3).toISOString();
+  await send(post, '/_fasttick'); await wait(1500); clearMarkets();
+  const rc2 = msgs().filter(m => /⏱ WINDOW RECAP/.test(m.text)).slice(-1)[0];
+  ok(rc2 && /ETH 15-min.*⏭ no edge/.test(rc2.text) && !/ETH 15-min[^⏎\n]*outside/.test(rc2.text), 'recap reports why it skipped while tradable, not the decided tail', rc2 && rc2.text);
   const msgN = msgs().length; await send(post, '/_fasttick'); await wait(800);
   ok(!msgs().slice(msgN).some(m => /WINDOW RECAP/.test(m.text)), 'each window recapped once');
 
