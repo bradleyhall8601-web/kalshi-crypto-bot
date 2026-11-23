@@ -25,10 +25,10 @@ W.shards = { 0: 0.66, 2: 0 };
 
   console.log('\n1. Buys whichever side is winning at the 10th and 12th minute');
   const early = market('KXETH15M', 9, 0.80);          // 9 min left: too early for this test
-  const up = market('KXBTC15M', 3, 0.80);             // YES winning at 80¢
-  const down = market('KXSOL15M', 3, 0.15);           // NO winning (YES at 15¢ → NO ask 86¢)
-  const tie = market('KXXRP15M', 3, 0.50);            // no clear leader
-  const dear = market('KXDOGE15M', 3, 0.985);         // winner costs 99.5¢ — above the max
+  const up = market('KXBTC15M', 2.9, 0.80);             // YES winning at 80¢
+  const down = market('KXSOL15M', 2.9, 0.15);           // NO winning (YES at 15¢ → NO ask 86¢)
+  const tie = market('KXXRP15M', 2.9, 0.50);            // no clear leader
+  const dear = market('KXDOGE15M', 2.9, 0.985);         // winner costs 99.5¢ — above the max
   await send('/_fasttick'); await wait(3500);
   const L = k => (((pinned().PAPERS || {}).late || {}).v || {})[k] || { pos: [], r: [] };
   const pos = L('m12').pos;
@@ -41,7 +41,11 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(W.orders.length === o0, 'paper only: no real orders');
   await send('/_fasttick'); await wait(2500);
   ok(L('m12').pos.filter(o => o.t === up.ticker).length === 1, 'one entry per window (no repeats on later scans)');
-  const ten = market('KXETH15M', 5.2, 0.70);           // 10th minute, YES winning
+  const notYet = market('KXZEC15M', 3.4, 0.80);        // 11:36 into the window — before the 12th minute
+  await send('/_fasttick'); await wait(2500);
+  ok(!L('m12').pos.some(o => o.t === notYet.ticker), 'waits for the full 12 minutes (not at 11:36)');
+  delete W.markets[notYet.ticker];
+  const ten = market('KXETH15M', 4.8, 0.70);           // 10th minute, YES winning
   await send('/_fasttick'); await wait(3000);
   ok(L('m10').pos.some(o => o.t === ten.ticker && o.side === 'yes') && !L('m12').pos.some(o => o.t === ten.ticker), '10th-minute entry goes to its own record');
   delete W.markets[ten.ticker];
@@ -60,7 +64,7 @@ W.shards = { 0: 0.66, 2: 0 };
 
   console.log('\n3. Can be switched off');
   await send('/set late 0'); await wait(300);
-  const off = market('KXHYPE15M', 3, 0.80);
+  const off = market('KXHYPE15M', 2.9, 0.80);
   await send('/_fasttick'); await wait(3000);
   ok(!L('m12').pos.some(o => o.t === off.ticker), '/set late 0 → no entries');
 

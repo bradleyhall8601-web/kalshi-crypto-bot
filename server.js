@@ -761,7 +761,7 @@ function paperOpen(o) { S.paper.pos = (S.paper.pos || []).concat([o]).slice(-60)
 // ---------- "buy the winner" late-entry tests (Brad, 11/23) ----------
 // On every 15-min market, wait until the 10th / 12th minute, then paper-buy whichever side is winning.
 // Paper only, each variant has its own record: never touches real money, calibration, lane learning or the main go-live proof.
-const LATE_VARIANTS = [{ k: 'm10', name: '10th-minute', lo: 4.75, hi: 5.75 }, { k: 'm12', name: '12th-minute', lo: 2.25, hi: 3.5 }];
+const LATE_VARIANTS = [{ k: 'm10', name: '10th-minute', lo: 4.25, hi: 5.0 }, { k: 'm12', name: '12th-minute', lo: 2.25, hi: 3.0 }]; // minutes LEFT: enter once 10:00 / 12:00 of the 15 have passed
 const lateState = () => { const L = (S.paper.late = S.paper.late || {}); L.v = L.v || {}; for (const x of LATE_VARIANTS) L.v[x.k] = L.v[x.k] || { r: [], pos: [] }; L.seen = L.seen || {}; return L; };
 const lateRec = k => { const V = lateState().v[k], n = V.r.length, sum = V.r.reduce((a, x) => a + x, 0), w = V.r.filter(x => x > 0).length; return { n, sum, w, avg: n ? sum / n : 0 }; };
 const lateLine = x => { const { n, sum, w, avg } = lateRec(x.k); return `⏰ ${x.name} test: ${n} trades · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract)`; };
@@ -884,7 +884,7 @@ async function scan(fast) {
     for (const m of markets) if (S.win[m.event_ticker]) S.win[m.event_ticker].close = Date.parse(m.close_time); // keep recap timing in sync with Kalshi
     for (let m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
-      if (isFast(series) && CFG.LATE === 1 && mins <= 5.75 && mins >= 2.25) await lateEntry(m, mins).catch(e => log('late entry failed', m.ticker, e.message));
+      if (isFast(series) && CFG.LATE === 1 && mins <= 5.0 && mins >= 2.25) await lateEntry(m, mins).catch(e => log('late entry failed', m.ticker, e.message));
       if (!inWindow(m, mins)) continue;
       const W0 = S.win[m.event_ticker] || (S.win[m.event_ticker] = { label: label(m.ticker).replace(/ ≥ \$[\d,.]+/, ''), series, close: Date.parse(m.close_time), best: null });
       if (!freshWin.has(m.event_ticker)) { freshWin.add(m.event_ticker); W0.bestV = null; W0.mk = null; }
