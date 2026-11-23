@@ -31,6 +31,12 @@ ok(news.sameStory('Chainflip Offers 10% Bounty After 122.86 BTC Vault Hack - Alt
 ok(news.sameStory('Federal Reserve: Consecutive hikes and sticky inflation – TD Securities - www.tmgm.com', ['Federal Reserve: Consecutive hikes and sticky inflation – TD Securities - FXStreet']), 'same headline from another outlet recognized');
 ok(!news.sameStory('Major exchange Bybit hacked, $1.4B drained', first), 'a different hack is a new story');
 ok(!news.sameStory('Coinbase halts trading after outage', ['Binance suspends withdrawals after exploit']), 'different exchanges are different stories');
+const binance = ['9,293 Ether moves between wallets tied to the 2026 Binance hack - Crypto Briefing'];
+ok(news.sameStory('DoJ seeks to recover over $1B in crypto stolen in Binance hack - Breakingthenews', binance), 'Binance hack follow-up (DoJ) is the same story');
+ok(news.sameStory('US prosecutors seek to forfeit $1.17 billion in stolen USDC from Binance hack - Reuters', binance), 'Binance hack follow-up (forfeit USDC) is the same story');
+ok(news.sameStory('Analytics firm Elliptic detects movement of $247 mln after Binance crypto exchange hack - Reuters', binance), 'Binance hack follow-up (Elliptic) is the same story');
+ok(!news.sameStory('Coinbase hacked, withdrawals halted - CoinDesk', binance), 'a hack at a different venue is a new story');
+ok(!news.sameStory('SEC charges Kraken over staking', ['SEC sues Coinbase over listings']), 'the same regulator acting on different firms is a new story');
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

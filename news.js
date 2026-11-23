@@ -70,5 +70,13 @@ async function poll(req, seen) {
 // The same story gets re-published by many outlets for hours; it should pause trading once, not every time.
 const GENERIC = new Set('the and for with from that this will into over after amid about than then they them their its are was were has have had been not but all new now just says said report reports news update live latest today week year price prices market markets crypto cryptocurrency bitcoin btc ethereum eth hack hacked hacks exploit stolen theft attack fed federal reserve rate rates hike hikes inflation recession data us u s world global million billion'.split(' '));
 const words = title => new Set(headline(title).toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(' ').filter(w => w.length >= 3 && !GENERIC.has(w) && !/^\d+$/.test(w)));
-function sameStory(title, recent) { const a = words(title); return (recent || []).some(r => { let n = 0; for (const w of words(r)) if (a.has(w)) n++; return n >= 2; }); }
+const FIRM = /\b(binance|coinbase|kraken|okx|bybit|bitfinex|gemini|tether|usdt|usdc|circle)\b/gi; // exchanges/stablecoins (regulators act on many firms, so they don't identify a story)
+const venuesOf = t => new Set((headline(t).match(FIRM) || []).map(x => x.toLowerCase()));
+function sameStory(title, recent) {
+  const a = words(title), v = CRITICAL.test(headline(title)) ? venuesOf(title) : new Set();
+  return (recent || []).some(r => {
+    if (v.size && CRITICAL.test(headline(r)) && [...venuesOf(r)].some(x => v.has(x))) return true; // follow-ups on the same venue's hack/halt ("DoJ seeks to recover…", "…moves tied to the Binance hack")
+    let n = 0; for (const w of words(r)) if (a.has(w)) n++; return n >= 2;
+  });
+}
 module.exports = { poll, parse, classify, calendarPause, sameStory, FEEDS };
