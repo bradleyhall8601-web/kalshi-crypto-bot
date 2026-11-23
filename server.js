@@ -795,6 +795,7 @@ async function lateGrade() {
     if (lines.length) parts.push(`${x.name}:\n${lines.join('\n')}`);
   }
   if (!parts.length) return;
+  log('LATE RECORD', LATE_VARIANTS.map(x => { const r = lateRec(x.k); return `${x.k} n=${r.n} w=${r.w} sum=${r.sum.toFixed(2)}`; }).join(' | ')); // full totals in the log (Telegram log lines are truncated)
   await say(`⏰ BUY-THE-WINNER TEST (paper)\n${parts.join('\n')}\n📊 ${LATE_VARIANTS.map(lateLine).join('\n📊 ').replace(/⏰ /g, '')}`);
   await saveSettings().catch(() => {});
 }
