@@ -22,9 +22,13 @@ function parse(xml) {
   return items;
 }
 // pause only when it can move BTC/ETH: major venues, stablecoins, BTC/ETH themselves, or real policy surprises
-const MAJOR = /\b(bitcoin|btc|ether(eum)?|eth|binance|coinbase|kraken|okx|bybit|bitfinex|gemini|tether|usdt|usdc|circle|blackrock|etf|sec|cftc|us treasury|treasury (department|secretary)|white house)\b/i;
+// what a hack/halt must hit to move the whole market: a big venue, a stablecoin, a regulator, or the BTC/ETH network itself
+// (a headline that merely mentions bitcoin — "$12M stolen in bitcoin", "food company's bitcoin losses" — is not enough)
+const VENUE = /\b(binance|coinbase|kraken|okx|bybit|bitfinex|gemini|tether|usdt|usdc|circle|blackrock|etf|sec|cftc|us treasury|treasury (department|secretary)|white house)\b/i;
+const CHAIN = /\b(bitcoin|ethereum|btc|eth) (network|blockchain|chain|core|mainnet|nodes?)\b/i;
+const MAJOR = { test: t => VENUE.test(t) || CHAIN.test(t) };
 // commentary, previews and explainers describe events, they aren't the event: log them, don't pause
-const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week ahead|what|why|how|could|may|might|warns?|calls? for|opinion|preview|prediction|forecast|outlook|lessons)\b|\?/i;
+const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week ahead|what|why|how|could|may|might|warns?|warning|concerns?|calls? for|opinion|preview|prediction|forecast|outlook|lessons|report on|case study|maps|risks?)\b|\?/i;
 // a macro pause needs US policy itself in the headline (not gold prices in India or a fund manager's view)
 const US_POLICY = /\b(fed|fomc|federal reserve|powell|warsh|cpi|payrolls|nonfarm|jobs report|treasury yields?)\b/i;
 const POLICY_SHOCK = /\b(raises|cuts|hikes|surprise|unexpected(ly)?|hotter|cooler|emergency|shock|jumps|surges|plunges)\b/i;
