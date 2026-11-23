@@ -1210,6 +1210,7 @@ async function onUpdate(u) {
   if (env.BOT_TEST === '1' && t === '/_fasttick') { await tick(true); return; }
   if (env.BOT_TEST === '1' && t === '/_news') { await pollNews(); return; }
   if (env.BOT_TEST === '1' && t === '/_clearnewspause') { S.newsPauseUntil = 0; return; }
+  if (env.BOT_TEST === '1' && t === '/_clearlearn') { S.learn = {}; return; } // tests: research findings must not leak into later tests
   if (env.BOT_TEST === '1' && t === '/_research') { await runResearch(); return; }
   if (t.startsWith('/research')) return say(S.lastResearch || '🧪 First research run happens ~3 min after start, then every 6 hours.');
   if (t.startsWith('/news')) {
@@ -1468,9 +1469,12 @@ async function pollNews() {
     const lines = [];
     for (const it of r.fresh) {
       S.newsLog.unshift(it); S.newsLog = S.newsLog.slice(0, 20);
+      S.pauseStories = (S.pauseStories || []).filter(x => Date.now() - x.at < 6 * 3600e3);
+      if (it.pauseMin > 0 && news.sameStory(it.title, S.pauseStories.map(x => x.title))) { it.pauseMin = 0; it.repeat = true; } // already paused for this story
+      if (it.pauseMin > 0) S.pauseStories.push({ title: it.title, at: Date.now() });
       if (it.pauseMin > 0 && Date.now() + it.pauseMin * 60e3 > S.newsPauseUntil) { S.newsPauseUntil = Date.now() + it.pauseMin * 60e3; S.newsPauseWhy = it.title.slice(0, 80); } // longest pause keeps its reason
       const icon = it.level === 'critical' ? '🚨' : it.level === 'macro' ? '🏛' : it.level.startsWith('critical') ? '⚠️' : it.level.startsWith('macro') ? '🏦' : '📊';
-      lines.push(`${icon} ${it.title.slice(0, 140)}${it.pauseMin ? ` — ⏸ trading paused ${it.pauseMin} min` : ''}`);
+      lines.push(`${icon} ${it.title.slice(0, 140)}${it.pauseMin ? ` — ⏸ trading paused ${it.pauseMin} min` : it.repeat ? ' — (same story, no new pause)' : ''}`);
     }
     if (lines.length) await say(`📰 NEWS\n${lines.slice(0, 6).join('\n')}${lines.length > 6 ? `\n…and ${lines.length - 6} more (/news)` : ''}`);
   } catch (e) { log('news failed', e.message); }

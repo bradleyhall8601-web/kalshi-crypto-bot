@@ -9,7 +9,7 @@ const FEEDS = [
 ];
 // high impact: hacks, outages, regulation shocks, surprise policy
 const CRITICAL = /\b(hack(ed)?|exploit(ed)?|drain(ed)?|stolen|breach|outage|halt(s|ed)?|suspend(s|ed)? (withdrawals|trading)|insolven|bankrupt|depeg|emergency|liquidation cascade|flash crash|sec (sues|charges)|crackdown|ban(s|ned)? (bitcoin|crypto))\b/i;
-const MACRO = /\b(fomc|federal reserve|fed (raises|cuts|holds|decision)|powell|warsh|rate (hike|cut)|cpi|inflation (data|report)|jobs report|nonfarm|payrolls|tariff|recession|treasury yields? (jump|surge|spike))\b/i;
+const MACRO = /\b(fomc|federal reserve|fed (unexpectedly |surprisingly )?(raises|cuts|hikes|holds|decision)|powell|warsh|rate (hike|cut)|cpi|inflation (data|report)|jobs report|nonfarm|payrolls|tariff|recession|treasury yields? (jump|surge|spike))\b/i;
 const MOVE = /\b(bitcoin|btc|ether(eum)?|eth|crypto)\b.*\b(plunge|plunges|crash|crashes|soar|soars|surge|surges|tumble|tumbles|spike|spikes|record high|all-time high)\b/i;
 
 function parse(xml) {
@@ -22,11 +22,17 @@ function parse(xml) {
   return items;
 }
 // pause only when it can move BTC/ETH: major venues, stablecoins, BTC/ETH themselves, or real policy surprises
-const MAJOR = /\b(bitcoin|btc|ether(eum)?|eth|binance|coinbase|kraken|okx|bybit|bitfinex|gemini|tether|usdt|usdc|circle|blackrock|etf|sec|cftc|treasury|white house)\b/i;
+const MAJOR = /\b(bitcoin|btc|ether(eum)?|eth|binance|coinbase|kraken|okx|bybit|bitfinex|gemini|tether|usdt|usdc|circle|blackrock|etf|sec|cftc|us treasury|treasury (department|secretary)|white house)\b/i;
+// commentary, previews and explainers describe events, they aren't the event: log them, don't pause
+const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week ahead|what|why|how|could|may|might|warns?|calls? for|opinion|preview|prediction|forecast|outlook|lessons)\b|\?/i;
+// a macro pause needs US policy itself in the headline (not gold prices in India or a fund manager's view)
+const US_POLICY = /\b(fed|fomc|federal reserve|powell|warsh|cpi|payrolls|nonfarm|jobs report|treasury yields?)\b/i;
 const POLICY_SHOCK = /\b(raises|cuts|hikes|surprise|unexpected(ly)?|hotter|cooler|emergency|shock|jumps|surges|plunges)\b/i;
+const headline = title => String(title).replace(/\s+[-–|]\s+[^-–|]+$/, ''); // drop the " - Outlet" suffix
 function classify(title) {
-  if (CRITICAL.test(title)) return MAJOR.test(title) ? { level: 'critical', pauseMin: 15 } : { level: 'critical-minor', pauseMin: 0 };
-  if (MACRO.test(title)) return POLICY_SHOCK.test(title) ? { level: 'macro', pauseMin: 10 } : { level: 'macro-minor', pauseMin: 0 };
+  const h = headline(title), event = !NOT_EVENT.test(h);
+  if (CRITICAL.test(h)) return MAJOR.test(h) && event ? { level: 'critical', pauseMin: 15 } : { level: 'critical-minor', pauseMin: 0 };
+  if (MACRO.test(h)) return POLICY_SHOCK.test(h) && US_POLICY.test(h) && event ? { level: 'macro', pauseMin: 10 } : { level: 'macro-minor', pauseMin: 0 };
   if (MOVE.test(title)) return { level: 'move', pauseMin: 0 };
   return null;
 }
@@ -57,4 +63,8 @@ async function poll(req, seen) {
   if (seen.size > 3000) { const arr = [...seen].slice(-1500); seen.clear(); arr.forEach(x => seen.add(x)); }
   return { fresh, sourcesOk: results.filter(r => r.status === 'fulfilled').length, sources: FEEDS.length };
 }
-module.exports = { poll, parse, classify, calendarPause, FEEDS };
+// The same story gets re-published by many outlets for hours; it should pause trading once, not every time.
+const GENERIC = new Set('the and for with from that this will into over after amid about than then they them their its are was were has have had been not but all new now just says said report reports news update live latest today week year price prices market markets crypto cryptocurrency bitcoin btc ethereum eth hack hacked hacks exploit stolen theft attack fed federal reserve rate rates hike hikes inflation recession data us u s world global million billion'.split(' '));
+const words = title => new Set(headline(title).toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(' ').filter(w => w.length >= 3 && !GENERIC.has(w) && !/^\d+$/.test(w)));
+function sameStory(title, recent) { const a = words(title); return (recent || []).some(r => { let n = 0; for (const w of words(r)) if (a.has(w)) n++; return n >= 2; }); }
+module.exports = { poll, parse, classify, calendarPause, sameStory, FEEDS };

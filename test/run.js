@@ -374,6 +374,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(lrn.BTC && lrn.BTC.m15 && typeof lrn.BTC.m15.k === 'number', 'learned parameters saved (survive restarts)');
   ok(lrn.BTC && lrn.BTC.m15 && lrn.BTC.m15.adopt === false, 'no pattern adopted from patternless data (no false discovery)', JSON.stringify(lrn.BTC && lrn.BTC.m15));
   await send(post, '/research'); await wait(300); ok(/🧪 RESEARCH UPDATE/.test(lastMsg().text), '/research shows latest findings');
+  await send(post, '/_clearlearn'); await wait(100); // later tests assume the baseline model
 
   console.log('\n12. Scorecard');
   const mS = market('KXETHD', 'eth', 30, 1678, 0.16);
