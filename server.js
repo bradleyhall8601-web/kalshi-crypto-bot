@@ -40,7 +40,7 @@ const CFG = {
   FAST_STREAK: 8,     // ...or after this many losses in a row (many markets now, so 4 in a row is ordinary bad luck)
   AUTO_GRACE: 0.03,   // auto may pay up to 3¢ above the live ask (only while the edge survives)
   AUTO_TRIES: 3,      // re-read the live book and retry this many times within ~3 seconds
-  MIN_PRICE: 0.15, MAX_PRICE: 0.85,
+  MIN_PRICE: 0.15, MAX_PRICE: 0.85, // production raised to 40¢ by settings migration v12 (paper data 11/22: under 40¢ went 2W-14L)
   MIN_MINUTES: 8, MAX_MINUTES: 70,
   VOL_MULT: Number(env.BOT_VOL_MULT || 1.0), // honest volatility; inflating it makes long shots look cheap
   MODEL_WEIGHT: 0.5, // blend: 50% our model, 50% the market's own price (guards against model overconfidence)
@@ -121,7 +121,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 11; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 12; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn;
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -142,8 +142,15 @@ async function loadSettings() {
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
     if (!(blob.v >= 10) && env.BOT_TEST !== '1') { CFG.TRADE_PCT = 0.06; CFG.DAILY_MIN_EQUITY = 50; CFG.MAKER = 1; CFG.KELLY = 0.5; setTimeout(saveSettings, 2000); } // grow-and-last sizing + limit bids
     if (blob.REST && typeof blob.REST === 'object') S.rest = blob.REST;
-    if (blob.PAPERS && typeof blob.PAPERS === 'object') S.paper = { r: blob.PAPERS.r || [], pos: blob.PAPERS.pos || [], bids: blob.PAPERS.bids || {}, since: blob.PAPERS.since || Date.now() };
+    if (blob.PAPERS && typeof blob.PAPERS === 'object') S.paper = { r: blob.PAPERS.r || [], pos: blob.PAPERS.pos || [], bids: blob.PAPERS.bids || {}, since: blob.PAPERS.since || Date.now(), old: blob.PAPERS.old || null };
     if (!(blob.v >= 11) && env.BOT_TEST !== '1') { CFG.PAPER = 1; S.paper.since = Date.now(); setTimeout(() => { saveSettings(); say('📄 PAPER TRADING ON — no real money is spent from now on. The bot keeps scanning every market and grades every trade it would have made against Kalshi\'s real results. It switches back to real money by itself after 50+ paper trades averaging +2¢ or better per contract. /paper shows the record.'); }, 3000); }
+    if (!(blob.v >= 12) && env.BOT_TEST !== '1') { // no more long shots; the go-live proof restarts so it measures only the new rule
+      CFG.MIN_PRICE = Math.max(CFG.MIN_PRICE, 0.40);
+      const r = S.paper.r || []; S.paper.old = { n: r.length, sum: Math.round(r.reduce((a, x) => a + x, 0) * 100) / 100, w: r.filter(x => x > 0).length };
+      S.paper.r = []; S.paper.since = Date.now();
+      S.paper.pos = (S.paper.pos || []).filter(o => o.px >= CFG.MIN_PRICE); for (const [k, b] of Object.entries(S.paper.bids || {})) if (b.q < CFG.MIN_PRICE) delete S.paper.bids[k];
+      setTimeout(() => { saveSettings(); say(`🎯 NEW RULE: no more long shots — the bot only buys contracts priced 40¢–85¢.\n📊 Why: in ${S.paper.old.n} paper trades, buys under 40¢ went 2 wins / 14 losses (−20¢ each), while 40¢+ buys made money.\n📄 Paper proof restarts from 0 to test the new rule honestly (old record: ${S.paper.old.n} trades ${S.paper.old.sum >= 0 ? '+' : '−'}$${Math.abs(S.paper.old.sum).toFixed(2)}). Still goes live after 50+ trades averaging +2¢.`); }, 3500);
+    }
     if (!(blob.v >= 9)) { for (const x of Object.values(HOURLY_ALT)) if (!CFG.SERIES.includes(x) && CFG.SERIES.some(y => coinOf(y) === coinOf(x))) CFG.SERIES.push(x); setTimeout(saveSettings, 2000); } // NEAR/ZEC hourly live under KX..H
     if (!(blob.v >= 8)) { for (const x of ALL_SERIES) if (!CFG.SERIES.includes(x)) CFG.SERIES.push(x); CFG.FAST_STREAK = Math.max(CFG.FAST_STREAK || 0, 8); CFG.DAILY = 1; CFG.MAX_OPEN_PCT = 0.6; CFG.LEARN = 1; setTimeout(saveSettings, 2000); } // all coins + daily + self-learning
     if (!(blob.v >= 7)) { CFG.ALWAYS_IN = 1; CFG.ALWAYS_EDGE = 0; CFG.ALWAYS_PCT = 0.10; setTimeout(saveSettings, 2000); }
@@ -219,9 +226,14 @@ async function kalshiOnce(method, path, body) {
   ).toString('base64');
   return req(BASE + PREFIX + path, { method, body, headers: { 'KALSHI-ACCESS-KEY': KEY_ID, 'KALSHI-ACCESS-TIMESTAMP': ts, 'KALSHI-ACCESS-SIGNATURE': sig } });
 }
-async function tg(method, payload) {
+async function tg(method, payload, tries = 0) {
   try { return await req(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, { method: 'POST', body: payload }); }
-  catch (e) { if (!/not modified/.test(e.message)) log('telegram error', e.message); return { ok: false, error: e.message }; }
+  catch (e) {
+    if (/not modified/.test(e.message)) return { ok: false, error: e.message };
+    // network blips ("fetch failed", timeouts) and 429/5xx get retried so a report isn't silently lost; other 4xx are real errors
+    if (tries < 3 && (!/-> \d{3}/.test(e.message) || /-> (429|5\d\d)/.test(e.message))) { await new Promise(r => setTimeout(r, (env.BOT_TEST === '1' ? 50 : 2000) * (tries + 1))); return tg(method, payload, tries + 1); }
+    log('telegram error', e.message); return { ok: false, error: e.message };
+  }
 }
 // every Telegram report is also written to the server log (one line), so a log review sees exactly what Brad saw
 const say = (text, extra = {}) => { if (!OWNER) return null; log('TG', String(text).replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 600)); return tg('sendMessage', { chat_id: OWNER, text, ...extra }); };
@@ -738,7 +750,7 @@ async function manageBids(latest, fast) {
 // including the bad fills when price moves against us. Graded against Kalshi's real settlement.
 const paperRec = () => { const r = S.paper.r || [], n = r.length, sum = r.reduce((a, x) => a + x, 0), w = r.filter(x => x > 0).length; return { n, sum, w, avg: n ? sum / n : 0 }; };
 const paperText = () => { const { n, sum, w, avg } = paperRec(), open = (S.paper.pos || []).length, bids = Object.keys(S.paper.bids || {}).length;
-  return `📄 PAPER ${CFG.PAPER === 1 ? 'TRADING ON (no real money)' : 'record'}\n🧾 ${n} graded · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢ per contract)\n⏳ ${open} open · ${bids} bids waiting\n🎯 Goes live after ${CFG.PAPER_PROVE_N}+ trades averaging +${Math.round(CFG.PAPER_PROVE_EDGE * 100)}¢ or better${n ? ` — now ${Math.max(0, CFG.PAPER_PROVE_N - n)} to go` : ''}`; };
+  return `📄 PAPER ${CFG.PAPER === 1 ? 'TRADING ON (no real money)' : 'record'}\n🧾 ${n} graded · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢ per contract)${S.paper.old ? `\n🗂 Before the 40¢ rule: ${S.paper.old.n} trades ${S.paper.old.sum >= 0 ? '+' : '−'}${money(Math.abs(S.paper.old.sum))}` : ''}\n⏳ ${open} open · ${bids} bids waiting\n🎯 Goes live after ${CFG.PAPER_PROVE_N}+ trades averaging +${Math.round(CFG.PAPER_PROVE_EDGE * 100)}¢ or better${n ? ` — now ${Math.max(0, CFG.PAPER_PROVE_N - n)} to go` : ''}`; };
 function paperOpen(o) { S.paper.pos = (S.paper.pos || []).concat([o]).slice(-60); if (S.win[o.ev]) S.win[o.ev].traded = { side: o.side, px: o.px, n: 1, paper: true }; }
 async function paperGrade() {
   const due = (S.paper.pos || []).filter(o => Date.now() > o.c + 3 * 60e3); if (!due.length) return;
