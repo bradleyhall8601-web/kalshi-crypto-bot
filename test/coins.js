@@ -26,7 +26,7 @@ const today = (() => { const p = Object.fromEntries(new Intl.DateTimeFormat('en-
   return String(Math.floor((Date.now() - (+p.hour * 3600 + +p.minute * 60 + +p.second) * 1000) / 1000)); })();
 // next 5 PM New York time that is 2h..26h away
 function next5pmET() {
-  for (let h = 2; h < 27; h++) { const t = new Date(Math.ceil((Date.now() + h * 3600e3) / 3600e3) * 3600e3);
+  for (let h = 0; h < 27; h++) { const t = new Date(Math.ceil((Date.now() + h * 3600e3) / 3600e3) * 3600e3); if (t - Date.now() < 15 * 60e3) continue; // next 5 PM ET within 24h, at least 15 min out (was skipping today's between 3–5 PM ET)
     const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', year: '2-digit', month: 'short', day: '2-digit' }).formatToParts(t).map(x => [x.type, x.value]));
     if (+p.hour === 17 && +p.minute === 0) return { t: t.getTime(), code: `${p.year}${p.month.toUpperCase()}${p.day}17` }; }
 }
