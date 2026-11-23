@@ -26,7 +26,7 @@ const today = (() => { const p = Object.fromEntries(new Intl.DateTimeFormat('en-
   return String(Math.floor((Date.now() - (+p.hour * 3600 + +p.minute * 60 + +p.second) * 1000) / 1000)); })();
 // next 5 PM New York time that is 2h..26h away
 function next5pmET() {
-  for (let h = 0; h < 27; h++) { const t = new Date(Math.ceil((Date.now() + h * 3600e3) / 3600e3) * 3600e3); if (t - Date.now() < 15 * 60e3) continue; // next 5 PM ET within 24h, at least 15 min out (was skipping today's between 3–5 PM ET)
+  for (let h = 0; h < 27; h++) { const t = new Date(Math.ceil((Date.now() + h * 3600e3) / 3600e3) * 3600e3); if (t - Date.now() < 9 * 60e3) continue; // next 5 PM ET at least 9 min out (the bot needs 8+); was skipping today's between 3–5 PM ET
     const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', year: '2-digit', month: 'short', day: '2-digit' }).formatToParts(t).map(x => [x.type, x.value]));
     if (+p.hour === 17 && +p.minute === 0) return { t: t.getTime(), code: `${p.year}${p.month.toUpperCase()}${p.day}17` }; }
 }
@@ -153,17 +153,19 @@ if (!RESTARTED) {
   await send('/scan'); await wait(4000);
   ok(!orders().slice(o0).includes(dly0.ticker), 'small wallet: daily markets skipped (money stays free for 15-min turnover)');
   delete W.markets[dly0.ticker]; await send('/set dailymin 0'); await wait(200); o0 = W.orders.length;
-  const dly = market('KXBTCD', 'btc', mins, 59900, -0.17, { ev: `KXBTCD-${nx.code}`, close: nx.t });
+  const dK = mins < 150 ? 59990 : 59900; // close to 5 PM ET a far strike is already decided (6¢) — keep the test market tradable at any hour
+  const dly = market('KXBTCD', 'btc', mins, dK, -0.17, { ev: `KXBTCD-${nx.code}`, close: nx.t });
   const far = market('KXBTCD', 'btc', 300, 59900, -0.12, { close: Math.floor((Date.now() + 300 * 60e3) / 3600e3) * 3600e3 + 1800e3 }); // ~5h out at :30 → not a daily, not within the hour
   await send('/scan'); await wait(5000);
-  ok(orders().slice(o0).includes(dly.ticker) && msgs().some(m => /🟢🤖 AUTO BUY · BTC daily/.test(m)), `daily 5 PM ET market auto-traded (${Math.round(mins)} min out)`, orders().slice(o0).join(','));
+  const noDaily = mins > 1430; // the last 9 min before 5 PM ET: no 5 PM market is both 8+ min and <24h away, so these two checks can't run right now
+  ok(noDaily || (orders().slice(o0).includes(dly.ticker) && msgs().some(m => /🟢🤖 AUTO BUY · BTC daily/.test(m))), noDaily ? 'daily auto-trade check skipped (run within 9 min of 5 PM ET)' : `daily 5 PM ET market auto-traded (${Math.round(mins)} min out)`, orders().slice(o0).join(','));
   ok(!orders().slice(o0).includes(far.ticker), 'far-off non-daily hourly market ignored');
 
   console.log('\n7. Money guard: never too much tied up at once');
   clear(); await send('/set maxopen 0.1'); await wait(200); o0 = W.orders.length;
   market('KXETH15M', 'eth', 9, 1679.2, -0.17);
   await send('/_fasttick'); await wait(2500);
-  ok(W.orders.length === o0, 'no new trade when open positions already exceed the cap');
+  ok(noDaily || W.orders.length === o0, noDaily ? 'money-guard check skipped (needs the daily position)' : 'no new trade when open positions already exceed the cap');
   await send('/set maxopen 0.6'); await wait(200);
 
   console.log('\n7b. Always-in uses fresh prices every scan (no stale-best lockout)');

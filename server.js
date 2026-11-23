@@ -62,6 +62,7 @@ const CFG = {
   MAKER_TTL_MIN: 5,  // re-check / re-post a resting bid at least this often
   KELLY: env.BOT_TEST === '1' ? 0 : 0.5,
   PAPER: 0,          // paper trading: score every trade the bot would make, spend nothing, until the record proves a profit
+  LATE: 1, LATE_MAX: 0.97, // Brad's test: at the 10th and 12th minute of each 15-min market, buy whichever side is winning (paper only, own records)
   PAPER_PROVE_N: 50, PAPER_PROVE_EDGE: 0.02, // go live after 50+ paper trades averaging +2¢ per contract after fees
   MAX_SAME_DIR: env.BOT_TEST === '1' ? 50 : 2, // coins move together: at most 2 bets on the same direction (up/down) per closing time
   RESERVE_SCALE: env.BOT_TEST === '1' ? 0 : 1, // reserve = the smaller of $RESERVE and 10% of the account (min 25¢), so a small account can still trade // size by half-Kelly on the calibrated edge (capped by tradepct)            // self-calibration: shrink the model toward the market by how much its past disagreements came true          // self-learning: each market type (coin x 15-min/hourly/daily) tightens or benches itself from its own real results
@@ -104,6 +105,8 @@ const SETTINGS = {
   maker:    { key: 'MAKER', desc: 'limit bids instead of paying the ask (1 = on, 0 = off)', min: 0, max: 1 },
   makeredge:{ key: 'MAKER_EDGE', desc: 'edge needed for a limit bid (0.02 = 2¢)', min: 0, max: 0.2 },
   paper:    { key: 'PAPER', desc: 'paper trading (1 = practice only, no real money; 0 = real)', min: 0, max: 1 },
+  late:     { key: 'LATE', desc: '10th/12th-minute tests on 15-min markets: buy whichever side is winning (paper only, own records): 1 on, 0 off', min: 0, max: 1 },
+  latemax:  { key: 'LATE_MAX', desc: 'highest price the 10th/12th-minute tests will pay for the winning side', min: 0.5, max: 0.99 },
   samedir:  { key: 'MAX_SAME_DIR', desc: 'max bets on the same direction (up/down) closing at the same time, across coins', min: 1, max: 50 },
   reservescale: { key: 'RESERVE_SCALE', desc: 'reserve shrinks with a small account (1 = on: min of $reserve and 10%)', min: 0, max: 1 },
   kelly:    { key: 'KELLY', desc: 'bet size as a share of the Kelly amount (0.5 = half; 0 = off)', min: 0, max: 1 },
@@ -121,7 +124,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 12; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 13; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: S.paper.late }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -143,8 +146,9 @@ async function loadSettings() {
     if (!(blob.v >= 10) && env.BOT_TEST !== '1') { CFG.TRADE_PCT = 0.06; CFG.DAILY_MIN_EQUITY = 50; CFG.MAKER = 1; CFG.KELLY = 0.5; setTimeout(saveSettings, 2000); } // grow-and-last sizing + limit bids
     if (blob.REST && typeof blob.REST === 'object') S.rest = blob.REST;
     if (Array.isArray(blob.NPS)) S.pauseStories = blob.NPS.filter(x => x && x.title && Date.now() - x.at < 6 * 3600e3);
-    if (blob.PAPERS && typeof blob.PAPERS === 'object') S.paper = { r: blob.PAPERS.r || [], pos: blob.PAPERS.pos || [], bids: blob.PAPERS.bids || {}, since: blob.PAPERS.since || Date.now(), old: blob.PAPERS.old || null };
+    if (blob.PAPERS && typeof blob.PAPERS === 'object') S.paper = { r: blob.PAPERS.r || [], pos: blob.PAPERS.pos || [], bids: blob.PAPERS.bids || {}, since: blob.PAPERS.since || Date.now(), old: blob.PAPERS.old || null, late: blob.PAPERS.late || undefined };
     if (!(blob.v >= 11) && env.BOT_TEST !== '1') { CFG.PAPER = 1; S.paper.since = Date.now(); setTimeout(() => { saveSettings(); say('📄 PAPER TRADING ON — no real money is spent from now on. The bot keeps scanning every market and grades every trade it would have made against Kalshi\'s real results. It switches back to real money by itself after 50+ paper trades averaging +2¢ or better per contract. /paper shows the record.'); }, 3000); }
+    if (!(blob.v >= 13) && env.BOT_TEST !== '1') setTimeout(() => { saveSettings(); say('⏰ NEW TEST ON (your idea): on every 15-min market the bot waits, then paper-buys whichever side is winning (YES if up, NO if down) — once at the 10th minute and once at the 12th, each with its own scorecard so we see which works better. Practice only — no real money, kept separate from the main record. Results come in as "⏰ BUY-THE-WINNER TEST"; /paper shows both totals. /set late 0 turns it off.'); }, 4000);
     if (!(blob.v >= 12) && env.BOT_TEST !== '1') { // no more long shots; the go-live proof restarts so it measures only the new rule
       CFG.MIN_PRICE = Math.max(CFG.MIN_PRICE, 0.40);
       const r = S.paper.r || []; S.paper.old = { n: r.length, sum: Math.round(r.reduce((a, x) => a + x, 0) * 100) / 100, w: r.filter(x => x > 0).length };
@@ -750,9 +754,50 @@ async function manageBids(latest, fast) {
 // the market later offers at or below our bid — i.e. only when a real resting bid would have been hit,
 // including the bad fills when price moves against us. Graded against Kalshi's real settlement.
 const paperRec = () => { const r = S.paper.r || [], n = r.length, sum = r.reduce((a, x) => a + x, 0), w = r.filter(x => x > 0).length; return { n, sum, w, avg: n ? sum / n : 0 }; };
-const paperText = () => { const { n, sum, w, avg } = paperRec(), open = (S.paper.pos || []).length, bids = Object.keys(S.paper.bids || {}).length;
+const paperText = () => paperTextMain() + (CFG.LATE === 1 || LATE_VARIANTS.some(x => lateRec(x.k).n) ? `\n${lateLines()}` : '');
+const paperTextMain = () => { const { n, sum, w, avg } = paperRec(), open = (S.paper.pos || []).length, bids = Object.keys(S.paper.bids || {}).length;
   return `📄 PAPER ${CFG.PAPER === 1 ? 'TRADING ON (no real money)' : 'record'}\n🧾 ${n} graded · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢ per contract)${S.paper.old ? `\n🗂 Before the 40¢ rule: ${S.paper.old.n} trades ${S.paper.old.sum >= 0 ? '+' : '−'}${money(Math.abs(S.paper.old.sum))}` : ''}\n⏳ ${open} open · ${bids} bids waiting\n🎯 Goes live after ${CFG.PAPER_PROVE_N}+ trades averaging +${Math.round(CFG.PAPER_PROVE_EDGE * 100)}¢ or better${n ? ` — now ${Math.max(0, CFG.PAPER_PROVE_N - n)} to go` : ''}`; };
 function paperOpen(o) { S.paper.pos = (S.paper.pos || []).concat([o]).slice(-60); if (S.win[o.ev]) S.win[o.ev].traded = { side: o.side, px: o.px, n: 1, paper: true }; }
+// ---------- "buy the winner" late-entry tests (Brad, 11/23) ----------
+// On every 15-min market, wait until the 10th / 12th minute, then paper-buy whichever side is winning.
+// Paper only, each variant has its own record: never touches real money, calibration, lane learning or the main go-live proof.
+const LATE_VARIANTS = [{ k: 'm10', name: '10th-minute', lo: 4.75, hi: 5.75 }, { k: 'm12', name: '12th-minute', lo: 2.25, hi: 3.5 }];
+const lateState = () => { const L = (S.paper.late = S.paper.late || {}); L.v = L.v || {}; for (const x of LATE_VARIANTS) L.v[x.k] = L.v[x.k] || { r: [], pos: [] }; L.seen = L.seen || {}; return L; };
+const lateRec = k => { const V = lateState().v[k], n = V.r.length, sum = V.r.reduce((a, x) => a + x, 0), w = V.r.filter(x => x > 0).length; return { n, sum, w, avg: n ? sum / n : 0 }; };
+const lateLine = x => { const { n, sum, w, avg } = lateRec(x.k); return `⏰ ${x.name} test: ${n} trades · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract)`; };
+const lateLines = () => LATE_VARIANTS.map(x => `${lateLine(x)} · ${lateState().v[x.k].pos.length} open`).join('\n');
+async function lateEntry(m, mins) {
+  const L = lateState(), x = LATE_VARIANTS.find(v => mins >= v.lo && mins <= v.hi); if (!x) return;
+  const key = x.k + '|' + m.event_ticker; if (L.seen[key] || S.paused || eventPause()) return;
+  try { m = await withLiveQuote(m); } catch (e) { return; }
+  const yb = d(m, 'yes_bid'), ya = d(m, 'yes_ask'), na = d(m, 'no_ask'); if (!(ya > 0 && na > 0 && yb >= 0)) return;
+  const mid = (yb + ya) / 2; let side = null, px = null;
+  if (mid >= 0.53) { side = 'yes'; px = ya; } else if (mid <= 0.47) { side = 'no'; px = na; }
+  L.seen[key] = Date.now(); for (const [k, t] of Object.entries(L.seen)) if (Date.now() - t > 6 * 3600e3) delete L.seen[k];
+  if (!side) { log('LATE skip', x.k, m.ticker, 'no clear leader', mid.toFixed(3)); return; }
+  if (px > CFG.LATE_MAX) { log('LATE skip', x.k, m.ticker, side, 'price', px, '> max', CFG.LATE_MAX); return; }
+  const V = L.v[x.k]; V.pos = V.pos.concat([{ t: m.ticker, ev: m.event_ticker, side, px, c: Date.parse(m.close_time), at: Date.now() }]).slice(-80);
+  log('LATE', x.k, m.ticker, side, px, `${mins.toFixed(1)} min left`);
+  await saveSettings().catch(() => {});
+}
+async function lateGrade() {
+  const L = lateState(), parts = [];
+  for (const x of LATE_VARIANTS) {
+    const V = L.v[x.k], due = V.pos.filter(o => Date.now() > o.c + 3 * 60e3), lines = [];
+    for (const o of due) {
+      let m; try { m = (await kalshi('GET', `/markets/${o.t}`)).market || {}; } catch (e) { continue; }
+      const res = String(m.result || '').toLowerCase();
+      if (res !== 'yes' && res !== 'no') { if (Date.now() > o.c + 6 * 3600e3) V.pos = V.pos.filter(y => y !== o); continue; }
+      const win = res === o.side ? 1 : 0, pnl = Math.round((win - o.px - 0.07 * o.px * (1 - o.px)) * 100) / 100; // taker fee included
+      V.r = V.r.concat([pnl]).slice(-500); V.pos = V.pos.filter(y => y !== o);
+      lines.push(`${win ? '✅' : '❌'} ${label(o.t).replace(/ ≥ \$[\d,.]+/, '')} ${o.side.toUpperCase()} @ ${cents(o.px)} ${pnl >= 0 ? '+' : '−'}${money(Math.abs(pnl))}`);
+    }
+    if (lines.length) parts.push(`${x.name}:\n${lines.join('\n')}`);
+  }
+  if (!parts.length) return;
+  await say(`⏰ BUY-THE-WINNER TEST (paper)\n${parts.join('\n')}\n📊 ${LATE_VARIANTS.map(lateLine).join('\n📊 ').replace(/⏰ /g, '')}`);
+  await saveSettings().catch(() => {});
+}
 async function paperGrade() {
   const due = (S.paper.pos || []).filter(o => Date.now() > o.c + 3 * 60e3); if (!due.length) return;
   const lines = [];
@@ -839,6 +884,7 @@ async function scan(fast) {
     for (const m of markets) if (S.win[m.event_ticker]) S.win[m.event_ticker].close = Date.parse(m.close_time); // keep recap timing in sync with Kalshi
     for (let m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
+      if (isFast(series) && CFG.LATE === 1 && mins <= 5.75 && mins >= 2.25) await lateEntry(m, mins).catch(e => log('late entry failed', m.ticker, e.message));
       if (!inWindow(m, mins)) continue;
       const W0 = S.win[m.event_ticker] || (S.win[m.event_ticker] = { label: label(m.ticker).replace(/ ≥ \$[\d,.]+/, ''), series, close: Date.parse(m.close_time), best: null });
       if (!freshWin.has(m.event_ticker)) { freshWin.add(m.event_ticker); W0.bestV = null; W0.mk = null; }
@@ -1214,7 +1260,8 @@ async function onUpdate(u) {
   if (env.BOT_TEST === '1' && t === '/_fasttick') { await tick(true); return; }
   if (env.BOT_TEST === '1' && t === '/_news') { await pollNews(); return; }
   if (env.BOT_TEST === '1' && t === '/_clearnewspause') { S.newsPauseUntil = 0; return; }
-  if (env.BOT_TEST === '1' && t === '/_clearlearn') { S.learn = {}; return; } // tests: research findings must not leak into later tests
+  if (env.BOT_TEST === '1' && t === '/_clearlearn') { S.learn = {}; return; }
+  if (env.BOT_TEST === '1' && t === '/_lateclosed') { for (const x of LATE_VARIANTS) for (const o of lateState().v[x.k].pos) o.c = Date.now() - 4 * 60e3; return; } // tests: pretend the test's windows closed // tests: research findings must not leak into later tests
   if (env.BOT_TEST === '1' && t === '/_research') { await runResearch(); return; }
   if (t.startsWith('/research')) return say(S.lastResearch || '🧪 First research run happens ~3 min after start, then every 6 hours.');
   if (t.startsWith('/news')) {
@@ -1400,6 +1447,7 @@ async function gradeAutoTrades() {
 async function scoreAlerts() {
   await gradeAutoTrades();
   await paperGrade().catch(e => log('paper grade failed', e.message));
+  await lateGrade().catch(e => log('late grade failed', e.message));
   const due = S.sc.open.filter(o => Date.now() > o.c + 3 * 60e3);
   let changed = false;
   for (const o of due) {
