@@ -6,7 +6,8 @@ let pass = 0, fail = 0;
 const ok = (c, n, x = '') => { if (c) { pass++; console.log('  ✅', n); } else { fail++; console.log('  ❌', n, x); } };
 const msgs = () => W.tg.filter(x => x.method === 'sendMessage' && !String(x.body.text).startsWith('⚙️ BOT SETTINGS')).map(x => x.body.text);
 const last = () => msgs().slice(-1)[0] || '';
-const pinned = () => JSON.parse(W.pinned.slice(W.pinned.indexOf('{')));
+const zlib = require('zlib');
+const pinned = () => { const t = W.pinned, zi = t.indexOf('Z:'); return zi >= 0 ? JSON.parse(zlib.inflateRawSync(Buffer.from(t.slice(zi + 2).trim(), 'base64')).toString()) : JSON.parse(t.slice(t.indexOf('{'))); };
 let seq = 0;
 function market(series, mins, yesMid) {
   const ev = `${series}-L${++seq}`, ticker = `${ev}-00`;
@@ -15,7 +16,14 @@ function market(series, mins, yesMid) {
   W.markets[ticker] = m; return m;
 }
 const settle = (m, result) => Object.assign(m, { close_time: new Date(Date.now() - 5 * 60e3).toISOString(), status: 'settled', result, keep: true });
-W.pinned = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify({ v: 12, PAPER: 1, MAKER: 1, AUTO_FAST: 1, AUTO_HOURLY: 1, ALWAYS_IN: 0, RESERVE: 1, PAPERS: { r: [0.1, -0.2], pos: [], bids: {}, since: Date.now() } });
+// production-sized state (what overflowed Telegram's 4096-char limit on 11/23): full calibration history, every lane, research results
+const rnd = (a, b) => Math.round((a + Math.random() * (b - a)) * 100) / 100;
+const coins = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'HYPE', 'NEAR', 'ZEC'];
+const LANES = Object.fromEntries(coins.flatMap(c => ['m15', 'h1', 'd1'].map(t => [`${c}|${t}`, { r: Array.from({ length: 12 }, () => rnd(-0.9, 0.8)), bar: 0.03, bench: 0 }])));
+const LRN = Object.fromEntries(coins.map(c => [c, { m15: { k: -0.2, mult: 0.55, adopt: true, gain: 0.0234, n: 1602, at: Date.now() }, h1: { k: -0.1, mult: 0.5, adopt: false, gain: -0.0971, n: 330, at: Date.now() } }]));
+const hist = Array.from({ length: 200 }, () => [Math.floor(rnd(1, 9.9) * 100), Math.floor(rnd(1, 9.9) * 100), Math.random() < 0.5 ? 1 : 0]);
+W.pinned = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify({ v: 12, PAPER: 1, MAKER: 1, AUTO_FAST: 1, AUTO_HOURLY: 1, ALWAYS_IN: 0, RESERVE: 1, PAPERS: { r: Array.from({ length: 45 }, () => rnd(-0.9, 0.6)).concat([0.1, -0.2]).slice(-2), pos: [], bids: {}, since: Date.now() },
+  LANES, LRN, SC: { n: 85, wins: 29, sumP: 36, brier: 18, pnl: -2.9, open: [], ev: {}, hist } });
 W.shards = { 0: 0.66, 2: 0 };
 
 (async () => {
@@ -67,6 +75,15 @@ W.shards = { 0: 0.66, 2: 0 };
   const off = market('KXHYPE15M', 2.9, 0.80);
   await send('/_fasttick'); await wait(3000);
   ok(!L('m12').pos.some(o => o.t === off.ticker), '/set late 0 → no entries');
+
+  console.log('\n4. Saved state always fits in Telegram (4096 chars) with a full day of test trades');
+  await send('/set late 1'); await wait(200);
+  for (let k = 0; k < 3; k++) { for (const c of ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'HYPE', 'NEAR', 'ZEC']) { market(`KX${c}15M`, 4.8, 0.8); market(`KX${c}15M`, 2.9, 0.2); } await send('/_fasttick'); await wait(4000); } // 3 windows of open positions (more than ever pile up live)
+  const P = pinned();
+  ok(W.pinned.length <= 4096, `pinned settings fit Telegram's limit (${W.pinned.length} chars)`);
+  ok(P.PAPERS.late.v.m10.pos.length >= 18 && P.PAPERS.late.v.m12.pos.length >= 18, 'open test positions were saved', JSON.stringify({ m10: P.PAPERS.late.v.m10.pos.length, m12: P.PAPERS.late.v.m12.pos.length }));
+  ok(P.PAPERS.late.v.m12.n === 2 && P.PAPERS.late.v.m12.w === 1 && Math.abs(P.PAPERS.late.v.m12.sum + 0.69) < 1e-9, 'running totals saved (survive restarts)', JSON.stringify(P.PAPERS.late.v.m12));
+  ok(!P.PAPERS.late.seen, 'in-memory dedupe map not saved (it overflowed the limit)');
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

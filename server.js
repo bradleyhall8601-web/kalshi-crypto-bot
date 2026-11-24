@@ -124,11 +124,17 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 13; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: S.paper.late }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 13; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
-  if (text.length > 4090) { S.led.auto = (S.led.auto || []).filter(x => !x.done).slice(-20); blob.LED = S.led; text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); }
+  const zip = () => '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64');
+  if (text.length > 4090) { S.led.auto = (S.led.auto || []).filter(x => !x.done).slice(-20); blob.LED = S.led; text = zip(); }
+  // still too big for Telegram (4096): trim the oldest history, never the settings themselves
+  if (text.length > 4090) { S.sc.hist = (S.sc.hist || []).slice(-120); blob.SC = S.sc; text = zip(); }
+  if (text.length > 4090) { blob.PAPERS = { ...blob.PAPERS, r: (S.paper.r || []).slice(-60), late: lateBlob(10) }; text = zip(); }
+  if (text.length > 4090) { S.sc.hist = (S.sc.hist || []).slice(-60); blob.SC = S.sc; blob.NPS = blob.NPS.slice(-5); text = zip(); }
+  if (text.length > 4090) { if (Date.now() - (S.bigWarn || 0) > 3600e3) { S.bigWarn = Date.now(); log('SETTINGS TOO BIG', text.length, 'chars — not saved'); } return; }
   if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok || /not modified/.test(r.error || '')) return; }
   const r = await tg('sendMessage', { chat_id: OWNER, text, disable_notification: true });
   if (r.ok) { pinnedId = r.result.message_id; await tg('pinChatMessage', { chat_id: OWNER, message_id: pinnedId, disable_notification: true }); }
@@ -762,13 +768,18 @@ function paperOpen(o) { S.paper.pos = (S.paper.pos || []).concat([o]).slice(-60)
 // On every 15-min market, wait until the 10th / 12th minute, then paper-buy whichever side is winning.
 // Paper only, each variant has its own record: never touches real money, calibration, lane learning or the main go-live proof.
 const LATE_VARIANTS = [{ k: 'm10', name: '10th-minute', lo: 4.25, hi: 5.0 }, { k: 'm12', name: '12th-minute', lo: 2.25, hi: 3.0 }]; // minutes LEFT: enter once 10:00 / 12:00 of the 15 have passed
-const lateState = () => { const L = (S.paper.late = S.paper.late || {}); L.v = L.v || {}; for (const x of LATE_VARIANTS) L.v[x.k] = L.v[x.k] || { r: [], pos: [] }; L.seen = L.seen || {}; return L; };
-const lateRec = k => { const V = lateState().v[k], n = V.r.length, sum = V.r.reduce((a, x) => a + x, 0), w = V.r.filter(x => x > 0).length; return { n, sum, w, avg: n ? sum / n : 0 }; };
+const lateState = () => { const L = (S.paper.late = S.paper.late || {}); L.v = L.v || {}; L.seen = L.seen || {};
+  for (const x of LATE_VARIANTS) { const V = (L.v[x.k] = L.v[x.k] || { r: [], pos: [] }); V.r = V.r || []; V.pos = V.pos || [];
+    if (typeof V.n !== 'number') { V.n = V.r.length; V.w = V.r.filter(y => y > 0).length; V.sum = Math.round(V.r.reduce((a, y) => a + y, 0) * 100) / 100; } } // running totals (older saves only had r)
+  return L; };
+// what goes in the pinned settings: totals + recent results + open positions (the "seen" map stays in memory — it made the save too big for Telegram)
+const lateBlob = (keep = 30) => { const L = lateState(); return { v: Object.fromEntries(LATE_VARIANTS.map(x => { const V = L.v[x.k]; return [x.k, { n: V.n, w: V.w, sum: V.sum, r: V.r.slice(-keep), pos: V.pos.map(o => ({ t: o.t, ev: o.ev, side: o.side, px: o.px, c: o.c })) }]; })) }; };
+const lateRec = k => { const V = lateState().v[k], n = V.n, sum = V.sum, w = V.w; return { n, sum, w, avg: n ? sum / n : 0 }; };
 const lateLine = x => { const { n, sum, w, avg } = lateRec(x.k); return `⏰ ${x.name} test: ${n} trades · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract)`; };
 const lateLines = () => LATE_VARIANTS.map(x => `${lateLine(x)} · ${lateState().v[x.k].pos.length} open`).join('\n');
 async function lateEntry(m, mins) {
   const L = lateState(), x = LATE_VARIANTS.find(v => mins >= v.lo && mins <= v.hi); if (!x) return;
-  const key = x.k + '|' + m.event_ticker; if (L.seen[key] || S.paused || eventPause()) return;
+  const key = x.k + '|' + m.event_ticker; if (L.seen[key] || L.v[x.k].pos.some(o => o.ev === m.event_ticker) || S.paused || eventPause()) return;
   try { m = await withLiveQuote(m); } catch (e) { return; }
   const yb = d(m, 'yes_bid'), ya = d(m, 'yes_ask'), na = d(m, 'no_ask'); if (!(ya > 0 && na > 0 && yb >= 0)) return;
   const mid = (yb + ya) / 2; let side = null, px = null;
@@ -789,7 +800,7 @@ async function lateGrade() {
       const res = String(m.result || '').toLowerCase();
       if (res !== 'yes' && res !== 'no') { if (Date.now() > o.c + 6 * 3600e3) V.pos = V.pos.filter(y => y !== o); continue; }
       const win = res === o.side ? 1 : 0, pnl = Math.round((win - o.px - 0.07 * o.px * (1 - o.px)) * 100) / 100; // taker fee included
-      V.r = V.r.concat([pnl]).slice(-500); V.pos = V.pos.filter(y => y !== o);
+      V.r = V.r.concat([pnl]).slice(-100); V.n += 1; V.w += win; V.sum = Math.round((V.sum + pnl) * 100) / 100; V.pos = V.pos.filter(y => y !== o);
       lines.push(`${win ? '✅' : '❌'} ${label(o.t).replace(/ ≥ \$[\d,.]+/, '')} ${o.side.toUpperCase()} @ ${cents(o.px)} ${pnl >= 0 ? '+' : '−'}${money(Math.abs(pnl))}`);
     }
     if (lines.length) parts.push(`${x.name}:\n${lines.join('\n')}`);
