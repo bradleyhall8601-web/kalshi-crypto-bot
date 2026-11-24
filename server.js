@@ -62,7 +62,7 @@ const CFG = {
   MAKER_TTL_MIN: 5,  // re-check / re-post a resting bid at least this often
   KELLY: env.BOT_TEST === '1' ? 0 : 0.5,
   PAPER: 0,          // paper trading: score every trade the bot would make, spend nothing, until the record proves a profit
-  LATE: 1, LATE_MAX: 0.97, LATE_LIVE: 0, LATE_STOP: 5, LATE_PER: 15, // LATE_LIVE: real-money 12th-minute strategy (all coins), 1 contract per coin per LATE_PER $ of account; turns itself off after LATE_STOP $ lost
+  LATE: 1, LATE_MAX: 0.97, LATE_LIVE: 0, LATE_STOP: 5, LATE_PER: 15, LATE_GRACE: 0.01, // LATE_LIVE: real-money 12th-minute strategy (all coins), 1 contract per coin per LATE_PER $ of account; turns itself off after LATE_STOP $ lost
   // Brad's test: at the 10th and 12th minute of each 15-min market, buy whichever side is winning (paper only, own records)
   PAPER_PROVE_N: 50, PAPER_PROVE_EDGE: 0.02, // go live after 50+ paper trades averaging +2¢ per contract after fees
   MAX_SAME_DIR: env.BOT_TEST === '1' ? 50 : 2, // coins move together: at most 2 bets on the same direction (up/down) per closing time
@@ -108,6 +108,7 @@ const SETTINGS = {
   paper:    { key: 'PAPER', desc: 'paper trading (1 = practice only, no real money; 0 = real)', min: 0, max: 1 },
   late:     { key: 'LATE', desc: '10th/12th-minute tests on 15-min markets: buy whichever side is winning (paper only, own records): 1 on, 0 off', min: 0, max: 1 },
   latelive: { key: 'LATE_LIVE', desc: 'REAL money 12th-minute strategy: every 15-min coin, buys whichever side is winning (1 = on, 0 = off)', min: 0, max: 1 },
+  lategrace:{ key: 'LATE_GRACE', desc: 'real 12th-minute buys may pay up to this much above the ask so they fill (never above latemax)', min: 0, max: 0.05 },
   lateper:  { key: 'LATE_PER', desc: 'real 12th-minute size: 1 contract per coin for every this many $ in the account', min: 1, max: 10000 },
   latestop: { key: 'LATE_STOP', desc: 'real 12th-minute strategy turns itself off after losing this many $ in total', min: 0.5, max: 10000 },
   latemax:  { key: 'LATE_MAX', desc: 'highest price the 10th/12th-minute tests will pay for the winning side', min: 0.5, max: 0.99 },
@@ -811,11 +812,12 @@ async function lateLive(m, side, px, name = '12th-minute') {
   if (CFG.LATE_LIVE !== 1 || LV.stopped || LV.pos.some(o => o.ev === m.event_ticker)) return;
   const a = await account(true), open = LV.pos.reduce((x, o) => x + o.cost, 0), money0 = a.cash + open;
   let count = Math.max(1, Math.floor(money0 / CFG.LATE_PER));
+  const lim = Math.max(px, Math.min(CFG.LATE_MAX, Math.round((px + CFG.LATE_GRACE) * 100) / 100)); // live: a cent of room so a 1¢ tick doesn't miss the fill (live 11/24: 3 of 5 missed)
   const room = Math.min(CFG.MAX_OPEN_PCT * money0 - open, a.cash - Math.max(resv(a), 0.02));
-  while (count > 0 && count * px + feeTotal(count, px) > room) count--;
+  while (count > 0 && count * lim + feeTotal(count, lim) > room) count--;
   if (count < 1) { log('LATE LIVE skip', m.ticker, 'room', room.toFixed(2), 'cash', a.cash, 'open', open.toFixed(2)); return; }
-  const r = await placeBuy({ ticker: m.ticker, side, count, price: px, auto: true });
-  if (!(r.filled > 0)) { log('LATE LIVE not filled', m.ticker, side, px); return; }
+  const r = await placeBuy({ ticker: m.ticker, side, count, price: lim, auto: true });
+  if (!(r.filled > 0)) { log('LATE LIVE not filled', m.ticker, side, px, 'limit', lim); return; }
   LV.pos = LV.pos.concat([{ t: m.ticker, ev: m.event_ticker, side, px: r.px, n: r.filled, cost: Math.round(r.total * 100) / 100, c: Date.parse(m.close_time) }]);
   log('LATE LIVE BUY', m.ticker, side, r.filled, r.px, r.total);
   await saveSettings().catch(() => {});
