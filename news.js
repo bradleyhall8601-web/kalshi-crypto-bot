@@ -32,7 +32,7 @@ const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week a
 // a macro pause needs US policy itself in the headline (not gold prices in India or a fund manager's view)
 const US_POLICY = /\b(fed|fomc|federal reserve|powell|warsh|cpi|payrolls|nonfarm|jobs report|treasury yields?)\b/i;
 const POLICY_SHOCK = /\b(raises|cuts|hikes|surprise|unexpected(ly)?|hotter|cooler|emergency|shock|jumps|surges|plunges)\b/i;
-const headline = title => String(title).replace(/\s+[-–|]\s+[^-–|]+$/, ''); // drop the " - Outlet" suffix
+const headline = title => String(title).replace(/\s+[-–|]\s+[^-–|]+$/, '').replace(/\(\s*[A-Z]{2,6}\s*:\s*[A-Z0-9.]{1,6}\s*\)/g, ''); // drop the " - Outlet" suffix and stock tickers like (ASX:HACK)
 function classify(title) {
   const h = headline(title), event = !NOT_EVENT.test(h);
   if (CRITICAL.test(h)) return MAJOR.test(h) && event ? { level: 'critical', pauseMin: 15 } : { level: 'critical-minor', pauseMin: 0 };
