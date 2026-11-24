@@ -85,6 +85,30 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(P.PAPERS.late.v.m12.n === 2 && P.PAPERS.late.v.m12.w === 1 && Math.abs(P.PAPERS.late.v.m12.sum + 0.69) < 1e-9, 'running totals saved (survive restarts)', JSON.stringify(P.PAPERS.late.v.m12));
   ok(!P.PAPERS.late.seen, 'in-memory dedupe map not saved (it overflowed the limit)');
 
+  console.log('\n5. Counts 15-min windows and gives a verdict at 50');
+  ok(/12th-minute test: 2 trades.*· 1\/50 windows/.test((await (send('/paper'), wait(300)), last())), 'two coins in one window count as 1 window', last());
+  await send('/_latewindows 49'); await wait(100);
+  const v1 = market('KXBTC15M', 2.9, 0.80); await send('/_fasttick'); await wait(3000);
+  settle(v1, 'yes'); await send('/_lateclosed'); await wait(100); await send('/scan'); await wait(5000);
+  const vm = msgs().filter(m => /BUY-THE-WINNER TEST/.test(m)).slice(-1)[0] || '';
+  ok(/❌ 12th-minute test FAILED after 50 windows: -17\.0¢\/contract \(needed \+2¢\)/.test(vm), 'losing record at 50 windows → FAILED verdict', vm);
+  ok(pinned().PAPERS.late.v.m12.verdict === 'fail' && pinned().PAPERS.late.v.m12.nw === 50, 'verdict and window count saved', JSON.stringify(pinned().PAPERS.late.v.m12));
+  const v2 = market('KXBTC15M', 2.9, 0.80); await send('/_fasttick'); await wait(3000);
+  settle(v2, 'yes'); await send('/_lateclosed'); await wait(100); await send('/scan'); await wait(5000);
+  ok(!/FAILED|PASSED/.test(msgs().filter(m => /BUY-THE-WINNER TEST/.test(m)).slice(-1)[0] || ''), 'verdict is announced only once');
+
+  console.log('\n6. Rebuilds the trades the save bug dropped (v14)');
+  const before = { m10: L('m10').pos.length, m12: L('m12').pos.length };
+  await send('/_laterecover'); await wait(5500);
+  const R = pinned().PAPERS.late.v;
+  ok(R.m10.pos.length - before.m10 === 17 && R.m12.pos.length - before.m12 === 19, '17 + 19 lost trades restored as positions to grade', JSON.stringify({ before, m10: R.m10.pos.length, m12: R.m12.pos.length }));
+  ok(R.m12.pos.some(o => o.t === 'KXBTC15M-26NOV231900-00' && o.side === 'yes' && o.px === 0.97 && o.c === Date.parse('2026-11-24T00:00:00Z')), 'tickers, sides, prices and close times match the logs');
+  ok(R.m10.pos.some(o => o.t === 'KXSOL15M-26NOV231830-30' && o.side === 'no' && o.px === 0.54 && o.c === Date.parse('2026-11-23T23:30:00Z')), 'ticker suffix matches the window minute');
+  await send('/_laterecover'); await wait(5500);
+  ok(pinned().PAPERS.late.v.m12.pos.length === R.m12.pos.length, 'running it twice adds nothing');
+  ok(/rebuilt from the bot's logs/.test(msgs().join('\n')), 'Brad is told about the restore');
+  ok(W.pinned.length <= 4096, `still fits Telegram's limit (${W.pinned.length} chars)`);
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('TEST CRASH', e); process.exit(1); });
