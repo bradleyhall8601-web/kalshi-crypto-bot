@@ -161,6 +161,7 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(W.orders.slice(rh2).some(o => o.ticker === hs2[1].ticker && o.side === 'ask'), 'after passing, hourly trades real money (NO leader here)', JSON.stringify(W.orders.slice(rh2)));
   await send('/paper'); await wait(300);
   ok(/hourly last-12-min test/.test(last()) && /daily last-12-min test/.test(last()), '/paper shows the hourly and daily tests', last());
+  ok(((pinned().PAPERS.late || {}).hA || {})[hEv2], 'hourly anchors are saved too (a restart keeps the hour)');
   ok(W.pinned.length <= 4096, `still fits Telegram's limit (${W.pinned.length} chars)`);
 
   console.log('\n10. Daily: strike pinned when the day is listed, saved for restarts, leader bought with 12 min left');

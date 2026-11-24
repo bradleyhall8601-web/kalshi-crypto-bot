@@ -775,7 +775,7 @@ function paperOpen(o) { S.paper.pos = (S.paper.pos || []).concat([o]).slice(-60)
 // On every 15-min market, wait until the 10th / 12th minute, then paper-buy whichever side is winning.
 // Paper only, each variant has its own record: never touches real money, calibration, lane learning or the main go-live proof.
 const LATE_VARIANTS = [{ k: 'm10', name: '10th-minute', lo: 4.25, hi: 5.0 }, { k: 'm12', name: '12th-minute', lo: 2.25, hi: 3.0 },
-  { k: 'h12', name: 'hourly last-12-min', lo: 11, hi: 12, slow: true }, { k: 'd12', name: 'daily last-12-min', lo: 11, hi: 12, slow: true }]; // hourly/daily (Brad 11/24): strike nearest the price when the hour/day opened, buy the leader with 12 min left // minutes LEFT: enter once 10:00 / 12:00 of the 15 have passed
+  { k: 'h12', name: 'hourly last-12-min', lo: 10, hi: 12, slow: true }, { k: 'd12', name: 'daily last-12-min', lo: 10, hi: 12, slow: true }]; // hourly/daily (Brad 11/24): strike nearest the price when the hour/day opened, buy the leader with 12 min left // minutes LEFT: enter once 10:00 / 12:00 of the 15 have passed
 const lateState = () => { const L = (S.paper.late = S.paper.late || {}); L.v = L.v || {}; L.seen = L.seen || {};
   for (const x of LATE_VARIANTS) { const V = (L.v[x.k] = L.v[x.k] || { r: [], pos: [] }); V.r = V.r || []; V.pos = V.pos || [];
     if (typeof V.n !== 'number') { V.n = V.r.length; V.w = V.r.filter(y => y > 0).length; V.sum = Math.round(V.r.reduce((a, y) => a + y, 0) * 100) / 100; } // running totals (older saves only had r)
@@ -783,7 +783,7 @@ const lateState = () => { const L = (S.paper.late = S.paper.late || {}); L.v = L
   const LV = (L.live = L.live || {}); LV.pos = LV.pos || []; LV.n = LV.n || 0; LV.w = LV.w || 0; LV.sum = LV.sum || 0; LV.cost = LV.cost || 0; // real-money 12th-minute test
   return L; };
 // what goes in the pinned settings: totals + recent results + open positions (the "seen" map stays in memory — it made the save too big for Telegram)
-const lateBlob = (keep = 30) => { const L = lateState(); return { v: Object.fromEntries(LATE_VARIANTS.map(x => { const V = L.v[x.k]; return [x.k, { n: V.n, w: V.w, sum: V.sum, nw: V.nw, cs: V.cs.slice(-10), ...(V.verdict ? { verdict: V.verdict } : {}), r: V.r.slice(-keep), pos: V.pos.map(o => ({ t: o.t, ev: o.ev, side: o.side, px: o.px, c: o.c })) }]; })), live: L.live, dA: L.dA || {} }; };
+const lateBlob = (keep = 30) => { const L = lateState(); return { v: Object.fromEntries(LATE_VARIANTS.map(x => { const V = L.v[x.k]; return [x.k, { n: V.n, w: V.w, sum: V.sum, nw: V.nw, cs: V.cs.slice(-10), ...(V.verdict ? { verdict: V.verdict } : {}), r: V.r.slice(-keep), pos: V.pos.map(o => ({ t: o.t, ev: o.ev, side: o.side, px: o.px, c: o.c })) }]; })), live: L.live, dA: L.dA || {}, hA: L.hA || {} }; };
 const lateRec = k => { const V = lateState().v[k], n = V.n, sum = V.sum, w = V.w; return { n, sum, w, avg: n ? sum / n : 0 }; };
 const LATE_WINDOWS = 50, LATE_PASS = 0.02; // verdict after 50 graded windows: passes at +2¢/contract or better
 const lateLine = x => { const { n, sum, w, avg } = lateRec(x.k), nw = lateState().v[x.k].nw; return `⏰ ${x.name} test: ${n} trades · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract) · ${Math.min(nw, LATE_WINDOWS)}/${LATE_WINDOWS} windows`; };
@@ -840,15 +840,15 @@ async function lateEntry(m, mins, k) {
 }
 // hourly/daily ladders: pin the strike nearest the price as the hour (or day) opens, then at 12 min left buy whichever side of it is winning
 async function lateLadder(markets, now) {
-  const L = lateState(), HA = (S.lateAnchor = S.lateAnchor || {}), DA = (L.dA = L.dA || {}), byEv = {}; // daily anchors are saved (a restart mustn't lose the day's strike)
+  const L = lateState(), HA = (L.hA = L.hA || {}), DA = (L.dA = L.dA || {}), byEv = {}; // anchors are saved (a restart mustn't lose the hour's/day's strike)
   for (const m of markets) (byEv[m.event_ticker] = byEv[m.event_ticker] || []).push(m);
   for (const [ev, ms] of Object.entries(byEv)) {
     const close = Date.parse(ms[0].close_time), mins = (close - now) / 60000, daily = isDailyClose(ms[0].close_time), len = daily ? 1440 : 60, A = daily ? DA : HA;
     if (!A[ev] && mins <= len && mins >= (daily ? 720 : len - 5)) { // hourly: as the hour opens; daily: as soon as it's listed in the first half of its day // window just opened: the at-the-money strike
       let best = null; for (const m of ms) { const yb = d(m, 'yes_bid'), ya = d(m, 'yes_ask'); if (!(ya > 0 && yb >= 0)) continue; const gap = Math.abs((yb + ya) / 2 - 0.5); if (!best || gap < best.gap) best = { t: m.ticker, gap }; }
-      if (best) { A[ev] = { t: best.t, c: close }; log('LATE anchor', daily ? 'd12' : 'h12', best.t, `${Math.round(mins)} min left`); if (daily) await saveSettings().catch(() => {}); }
+      if (best) { A[ev] = { t: best.t, c: close }; log('LATE anchor', daily ? 'd12' : 'h12', best.t, `${Math.round(mins)} min left`); await saveSettings().catch(() => {}); }
     }
-    if (A[ev] && mins >= 11 && mins <= 12) { const m = ms.find(x => x.ticker === A[ev].t); if (m) await lateEntry(m, mins, daily ? 'd12' : 'h12'); }
+    if (A[ev] && mins >= 10 && mins <= 12) { /* 2-minute entry window so one late scan or a short pause doesn't miss the hour */ const m = ms.find(x => x.ticker === A[ev].t); if (m) await lateEntry(m, mins, daily ? 'd12' : 'h12'); }
   }
   for (const A of [HA, DA]) for (const [ev, a] of Object.entries(A)) if (now > a.c + 3600e3) delete A[ev];
 }
