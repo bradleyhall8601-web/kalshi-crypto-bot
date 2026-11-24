@@ -120,7 +120,7 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(real.some(o => o.ticker === lb.ticker && o.side === 'bid' && o.count === '1.00' && o.time_in_force === 'immediate_or_cancel'), 'BTC: real buy of 1 YES at the 12th minute', JSON.stringify(real));
   ok(real.some(o => o.ticker === le.ticker), 'every coin trades, not just BTC');
   ok(!real.some(o => o.ticker === l10.ticker), '10th-minute (failed test) never uses real money');
-  ok(/💵 REAL BUY \(12th-minute test\)/.test(msgs().join('\n')), 'Brad gets a REAL BUY message');
+  ok(/💵 REAL BUY \(12th-minute\)/.test(msgs().join('\n')), 'Brad gets a REAL BUY message');
   ok(L('m12').pos.some(o => o.t === lb.ticker), 'paper record still kept alongside');
   await send('/_fasttick'); await wait(2500);
   ok(W.orders.slice(r0).filter(o => o.ticker === lb.ticker).length === 1, 'one real buy per coin per window');
@@ -142,6 +142,25 @@ W.shards = { 0: 0.66, 2: 0 };
   const g2 = market('KXETH15M', 2.9, 0.80); await send('/_fasttick'); await wait(3500);
   const big = W.orders.slice(r3).find(o => o.ticker === g2.ticker), open7 = 2 * 0.81 + 0.03;
   ok(big && Number(big.count) * 0.81 <= 0.6 * (10 + open7) - open7 + 1e-9 && Number(big.count) >= 1, 'never more than 60% of the money in open bets', JSON.stringify(big));
+  ok(W.pinned.length <= 4096, `still fits Telegram's limit (${W.pinned.length} chars)`);
+
+  console.log('\n9. Hourly + daily: strike nearest the opening price, buy the leader with 12 min left; real money only after passing');
+  const ladder = (ev, mins, mids) => mids.map((mid, i) => { const t = `${ev}-T${60000 + i * 500}`; const m = { ticker: t, event_ticker: ev, close_time: new Date(Date.now() + mins * 60e3).toISOString(), floor_strike: 60000 + i * 500, strike_type: 'greater_or_equal',
+    yes_ask_dollars: (mid + 0.01).toFixed(4), yes_bid_dollars: (mid - 0.01).toFixed(4), no_ask_dollars: (1 - mid + 0.01).toFixed(4), exchange_index: 0, status: 'open' }; W.markets[t] = m; return m; });
+  const reclose = (ms, mins, mids) => ms.forEach((m, i) => Object.assign(m, { close_time: new Date(Date.now() + mins * 60e3).toISOString(), yes_ask_dollars: (mids[i] + 0.01).toFixed(4), yes_bid_dollars: (mids[i] - 0.01).toFixed(4), no_ask_dollars: (1 - mids[i] + 0.01).toFixed(4) }));
+  const hEv = 'KXBTCD-26NOV2410'; let hs = ladder(hEv, 59, [0.85, 0.52, 0.18]);
+  await send('/scan'); await wait(3000);
+  reclose(hs, 11.5, [0.97, 0.80, 0.30]); const rh = W.orders.length;
+  await send('/scan'); await wait(3000);
+  ok(L('h12').pos.some(o => o.t === hs[1].ticker && o.side === 'yes'), 'hourly: buys the leader on the strike that was at-the-money when the hour opened', JSON.stringify(L('h12').pos));
+  ok(!L('h12').pos.some(o => o.t === hs[0].ticker || o.t === hs[2].ticker), 'only that one strike per hour');
+  ok(W.orders.length === rh, 'hourly stays paper until it passes its own 50-window test');
+  await send('/_latepass h12'); await send('/_livereset'); W.shards[0] = 40; await wait(100);
+  const hEv2 = 'KXBTCD-26NOV2411'; const hs2 = ladder(hEv2, 59, [0.80, 0.49, 0.2]); await send('/scan'); await wait(3000);
+  reclose(hs2, 11.5, [0.9, 0.20, 0.05]); const rh2 = W.orders.length; await send('/scan'); await wait(3500);
+  ok(W.orders.slice(rh2).some(o => o.ticker === hs2[1].ticker && o.side === 'ask'), 'after passing, hourly trades real money (NO leader here)', JSON.stringify(W.orders.slice(rh2)));
+  await send('/paper'); await wait(300);
+  ok(/hourly last-12-min test/.test(last()) && /daily last-12-min test/.test(last()), '/paper shows the hourly and daily tests', last());
   ok(W.pinned.length <= 4096, `still fits Telegram's limit (${W.pinned.length} chars)`);
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
