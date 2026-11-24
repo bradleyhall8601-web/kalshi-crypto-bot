@@ -12,6 +12,9 @@ ok(pauses('Binance suspends withdrawals after exploit - CoinDesk'), 'Binance sus
 ok(pauses('Fed unexpectedly raises rates by 50bp - Reuters'), 'surprise Fed hike pauses');
 ok(!pauses('Northwestern Mutual Wealth Management: Expects continued volatility in tech stocks; monitors impact of Federal Reserve rate hikes - 富途牛牛'), 'adviser commentary ("expects… monitors") does not pause (live 11/23 false pause)');
 ok(!pauses('Gold edges up on bargain buying after selloff; US inflation data awaited - Investify'), '"data awaited" preview does not pause');
+ok(!pauses('REGULATION | Circle Agrees to Mint Over $1 Billion Replacement USDC Linked to the Binance Hack - BitKE'), 'old-hack aftermath (replacement USDC) does not pause (live 11/24 false pause)');
+ok(!pauses('Binance working with DoJ on recovery of stolen crypto - Breakingthenews.net'), 'old-hack recovery story does not pause (live 11/24 false pause)');
+ok(pauses("Kraken's BTC/CAD market flash crash caused by liquidity - Pluang"), 'a live exchange flash crash still pauses');
 ok(!pauses('Betashares Cyber ETF (ASX:HACK) Seeks Footing as Fed Rate Bets Shift - Kalkine Media'), 'a stock ticker named HACK is not a hack (live 11/23 false pause)');
 ok(pauses('Bybit hacked: $1.4 billion in ETH stolen - CoinDesk') || pauses('Bybit hack: $1.4 billion in ETH stolen - CoinDesk'), 'a real exchange hack still pauses');
 ok(pauses('Fed raises rates more than expected, stocks tumble - Reuters'), 'a real surprise hike still pauses ("expected" is not commentary)');
