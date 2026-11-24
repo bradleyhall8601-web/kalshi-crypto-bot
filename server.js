@@ -62,7 +62,8 @@ const CFG = {
   MAKER_TTL_MIN: 5,  // re-check / re-post a resting bid at least this often
   KELLY: env.BOT_TEST === '1' ? 0 : 0.5,
   PAPER: 0,          // paper trading: score every trade the bot would make, spend nothing, until the record proves a profit
-  LATE: 1, LATE_MAX: 0.97, // Brad's test: at the 10th and 12th minute of each 15-min market, buy whichever side is winning (paper only, own records)
+  LATE: 1, LATE_MAX: 0.97, LATE_LIVE: 0, LATE_STOP: 5, LATE_PER: 15, // LATE_LIVE: real-money 12th-minute strategy (all coins), 1 contract per coin per LATE_PER $ of account; turns itself off after LATE_STOP $ lost
+  // Brad's test: at the 10th and 12th minute of each 15-min market, buy whichever side is winning (paper only, own records)
   PAPER_PROVE_N: 50, PAPER_PROVE_EDGE: 0.02, // go live after 50+ paper trades averaging +2¢ per contract after fees
   MAX_SAME_DIR: env.BOT_TEST === '1' ? 50 : 2, // coins move together: at most 2 bets on the same direction (up/down) per closing time
   RESERVE_SCALE: env.BOT_TEST === '1' ? 0 : 1, // reserve = the smaller of $RESERVE and 10% of the account (min 25¢), so a small account can still trade // size by half-Kelly on the calibrated edge (capped by tradepct)            // self-calibration: shrink the model toward the market by how much its past disagreements came true          // self-learning: each market type (coin x 15-min/hourly/daily) tightens or benches itself from its own real results
@@ -106,6 +107,9 @@ const SETTINGS = {
   makeredge:{ key: 'MAKER_EDGE', desc: 'edge needed for a limit bid (0.02 = 2¢)', min: 0, max: 0.2 },
   paper:    { key: 'PAPER', desc: 'paper trading (1 = practice only, no real money; 0 = real)', min: 0, max: 1 },
   late:     { key: 'LATE', desc: '10th/12th-minute tests on 15-min markets: buy whichever side is winning (paper only, own records): 1 on, 0 off', min: 0, max: 1 },
+  latelive: { key: 'LATE_LIVE', desc: 'REAL money 12th-minute strategy: every 15-min coin, buys whichever side is winning (1 = on, 0 = off)', min: 0, max: 1 },
+  lateper:  { key: 'LATE_PER', desc: 'real 12th-minute size: 1 contract per coin for every this many $ in the account', min: 1, max: 10000 },
+  latestop: { key: 'LATE_STOP', desc: 'real 12th-minute strategy turns itself off after losing this many $ in total', min: 0.5, max: 10000 },
   latemax:  { key: 'LATE_MAX', desc: 'highest price the 10th/12th-minute tests will pay for the winning side', min: 0.5, max: 0.99 },
   samedir:  { key: 'MAX_SAME_DIR', desc: 'max bets on the same direction (up/down) closing at the same time, across coins', min: 1, max: 50 },
   reservescale: { key: 'RESERVE_SCALE', desc: 'reserve shrinks with a small account (1 = on: min of $reserve and 10%)', min: 0, max: 1 },
@@ -124,7 +128,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 14; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 15; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -156,6 +160,7 @@ async function loadSettings() {
     if (!(blob.v >= 11) && env.BOT_TEST !== '1') { CFG.PAPER = 1; S.paper.since = Date.now(); setTimeout(() => { saveSettings(); say('📄 PAPER TRADING ON — no real money is spent from now on. The bot keeps scanning every market and grades every trade it would have made against Kalshi\'s real results. It switches back to real money by itself after 50+ paper trades averaging +2¢ or better per contract. /paper shows the record.'); }, 3000); }
     if (!(blob.v >= 13) && env.BOT_TEST !== '1') setTimeout(() => { saveSettings(); say('⏰ NEW TEST ON (your idea): on every 15-min market the bot waits, then paper-buys whichever side is winning (YES if up, NO if down) — once at the 10th minute and once at the 12th, each with its own scorecard so we see which works better. Practice only — no real money, kept separate from the main record. Results come in as "⏰ BUY-THE-WINNER TEST"; /paper shows both totals. /set late 0 turns it off.'); }, 4000);
     if (!(blob.v >= 14) && env.BOT_TEST !== '1') lateRecover();
+    if (!(blob.v >= 15) && env.BOT_TEST !== '1') { CFG.LATE_LIVE = 1; setTimeout(() => { saveSettings(); say(`💵 REAL MONEY ON — 12th-minute strategy (your go, 11/24)\n⏰ Every 15-min market, all 9 coins: at the 12th minute it buys whichever side is winning, with real money.\n📏 Size: 1 contract per coin for every ${money(CFG.LATE_PER)} in the account — grows as the account grows.\n🛡 Never more than ${Math.round(CFG.MAX_OPEN_PCT * 100)}% of the money in open bets at once; turns itself off if it loses ${money(CFG.LATE_STOP)} in total.\n📄 Main strategy stays paper. /paper shows both. /set latelive 0 stops it anytime.`); }, 4500); } // Brad 11/24: go full blown with the 12-minute version
     if (!(blob.v >= 12) && env.BOT_TEST !== '1') { // no more long shots; the go-live proof restarts so it measures only the new rule
       CFG.MIN_PRICE = Math.max(CFG.MIN_PRICE, 0.40);
       const r = S.paper.r || []; S.paper.old = { n: r.length, sum: Math.round(r.reduce((a, x) => a + x, 0) * 100) / 100, w: r.filter(x => x > 0).length };
@@ -773,9 +778,10 @@ const lateState = () => { const L = (S.paper.late = S.paper.late || {}); L.v = L
   for (const x of LATE_VARIANTS) { const V = (L.v[x.k] = L.v[x.k] || { r: [], pos: [] }); V.r = V.r || []; V.pos = V.pos || [];
     if (typeof V.n !== 'number') { V.n = V.r.length; V.w = V.r.filter(y => y > 0).length; V.sum = Math.round(V.r.reduce((a, y) => a + y, 0) * 100) / 100; } // running totals (older saves only had r)
     if (typeof V.nw !== 'number') V.nw = 0; V.cs = Array.isArray(V.cs) ? V.cs : []; } // nw = 15-min windows graded, cs = recent window close times (so each window counts once)
+  const LV = (L.live = L.live || {}); LV.pos = LV.pos || []; LV.n = LV.n || 0; LV.w = LV.w || 0; LV.sum = LV.sum || 0; LV.cost = LV.cost || 0; // real-money 12th-minute test
   return L; };
 // what goes in the pinned settings: totals + recent results + open positions (the "seen" map stays in memory — it made the save too big for Telegram)
-const lateBlob = (keep = 30) => { const L = lateState(); return { v: Object.fromEntries(LATE_VARIANTS.map(x => { const V = L.v[x.k]; return [x.k, { n: V.n, w: V.w, sum: V.sum, nw: V.nw, cs: V.cs.slice(-10), ...(V.verdict ? { verdict: V.verdict } : {}), r: V.r.slice(-keep), pos: V.pos.map(o => ({ t: o.t, ev: o.ev, side: o.side, px: o.px, c: o.c })) }]; })) }; };
+const lateBlob = (keep = 30) => { const L = lateState(); return { v: Object.fromEntries(LATE_VARIANTS.map(x => { const V = L.v[x.k]; return [x.k, { n: V.n, w: V.w, sum: V.sum, nw: V.nw, cs: V.cs.slice(-10), ...(V.verdict ? { verdict: V.verdict } : {}), r: V.r.slice(-keep), pos: V.pos.map(o => ({ t: o.t, ev: o.ev, side: o.side, px: o.px, c: o.c })) }]; })), live: L.live }; };
 const lateRec = k => { const V = lateState().v[k], n = V.n, sum = V.sum, w = V.w; return { n, sum, w, avg: n ? sum / n : 0 }; };
 const LATE_WINDOWS = 50, LATE_PASS = 0.02; // verdict after 50 graded windows: passes at +2¢/contract or better
 const lateLine = x => { const { n, sum, w, avg } = lateRec(x.k), nw = lateState().v[x.k].nw; return `⏰ ${x.name} test: ${n} trades · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract) · ${Math.min(nw, LATE_WINDOWS)}/${LATE_WINDOWS} windows`; };
@@ -795,7 +801,25 @@ function lateRecover() {
       if (!V.pos.some(o => o.t === t)) V.pos.push({ t, ev, side, px, c: C(close[hm]), at: C(close[hm]) - 3 * 60e3, rc: 1 }); } }
   setTimeout(() => { saveSettings(); say('🔧 FIXED: the 5:00–6:15 PM test trades that a save bug dropped were rebuilt from the bot\'s logs (17 for the 10th-minute test, 19 for the 12th). They get graded against Kalshi\'s real results in the next few minutes. /paper now also shows how many 15-min windows each test has — it gives a verdict at 50.'); }, 4500);
 }
-const lateLines = () => LATE_VARIANTS.map(x => `${lateLine(x)} · ${lateState().v[x.k].pos.length} open`).join('\n');
+const liveLine = () => { const LV = lateState().live; return `💵 REAL 12th-minute (all coins): ${CFG.LATE_LIVE === 1 ? 'ON' : LV.stopped ? 'STOPPED' : 'OFF'} · ${LV.n} trades · ${LV.w}W·${LV.n - LV.w}L · ${LV.sum >= 0 ? '+' : '−'}${money(Math.abs(LV.sum))} · stops at −${money(CFG.LATE_STOP)} · ${LV.pos.length} open`; };
+const lateLines = () => LATE_VARIANTS.map(x => `${lateLine(x)} · ${lateState().v[x.k].pos.length} open`).join('\n') + (CFG.LATE_LIVE === 1 || lateState().live.n || lateState().live.stopped ? '\n' + liveLine() : '');
+// real money: the 12th-minute strategy on every coin, at the same moment and price the paper test buys (Brad funded $15 on 11/24 after the paper test passed: "go full blown")
+// size grows with the account (1 contract per coin per LATE_PER $); never more than MAX_OPEN_PCT of the money in open positions; reserve kept
+async function lateLive(m, side, px) {
+  const LV = lateState().live;
+  if (CFG.LATE_LIVE !== 1 || LV.stopped || LV.pos.some(o => o.ev === m.event_ticker)) return;
+  const a = await account(true), open = LV.pos.reduce((x, o) => x + o.cost, 0), money0 = a.cash + open;
+  let count = Math.max(1, Math.floor(money0 / CFG.LATE_PER));
+  const room = Math.min(CFG.MAX_OPEN_PCT * money0 - open, a.cash - Math.max(resv(a), 0.02));
+  while (count > 0 && count * px + feeTotal(count, px) > room) count--;
+  if (count < 1) { log('LATE LIVE skip', m.ticker, 'room', room.toFixed(2), 'cash', a.cash, 'open', open.toFixed(2)); return; }
+  const r = await placeBuy({ ticker: m.ticker, side, count, price: px, auto: true });
+  if (!(r.filled > 0)) { log('LATE LIVE not filled', m.ticker, side, px); return; }
+  LV.pos = LV.pos.concat([{ t: m.ticker, ev: m.event_ticker, side, px: r.px, n: r.filled, cost: Math.round(r.total * 100) / 100, c: Date.parse(m.close_time) }]);
+  log('LATE LIVE BUY', m.ticker, side, r.filled, r.px, r.total);
+  await saveSettings().catch(() => {});
+  await say(`💵 REAL BUY (12th-minute test) · ${label(m.ticker).replace(/ ≥ \$[\d,.]+/, '')}\n🎟 ${r.filled} ${side.toUpperCase()} ${side === 'yes' ? '(⬆️ up)' : '(⬇️ down)'} @ ${cents(r.px)} = ${money(r.total)} (fee ${money(r.fees)})\n✅ Win pays ${money(r.filled)} (+${money(r.filled - r.total)}) · ❌ lose −${money(r.total)}\n💰 Wallet ≈ ${money(a.cash - r.total)}`);
+}
 async function lateEntry(m, mins) {
   const L = lateState(), x = LATE_VARIANTS.find(v => mins >= v.lo && mins <= v.hi); if (!x) return;
   const key = x.k + '|' + m.event_ticker; if (L.seen[key] || L.v[x.k].pos.some(o => o.ev === m.event_ticker) || S.paused || eventPause()) return;
@@ -808,6 +832,7 @@ async function lateEntry(m, mins) {
   if (px > CFG.LATE_MAX) { log('LATE skip', x.k, m.ticker, side, 'price', px, '> max', CFG.LATE_MAX); return; }
   const V = L.v[x.k]; V.pos = V.pos.concat([{ t: m.ticker, ev: m.event_ticker, side, px, c: Date.parse(m.close_time), at: Date.now() }]).slice(-80);
   log('LATE', x.k, m.ticker, side, px, `${mins.toFixed(1)} min left`);
+  if (x.k === 'm12') await lateLive(m, side, px).catch(e => { log('LATE LIVE failed', m.ticker, e.message); return say(`⚠️ Real 12th-minute buy failed: ${String(e.message).replace(/^.*?-> /, '').slice(0, 200)} — no money spent on this one.`); });
   await saveSettings().catch(() => {});
 }
 async function lateGrade() {
@@ -827,9 +852,21 @@ async function lateGrade() {
     if (V.nw >= LATE_WINDOWS && !V.verdict) { const { avg } = lateRec(x.k); V.verdict = avg >= LATE_PASS ? 'pass' : 'fail';
       verdicts.push(V.verdict === 'pass' ? `✅ ${x.name} test PASSED after ${V.nw} windows: ${(avg * 100).toFixed(1)}¢/contract (needed +${Math.round(LATE_PASS * 100)}¢). Still paper only — real money needs your OK and a few dollars in the account.` : `❌ ${x.name} test FAILED after ${V.nw} windows: ${(avg * 100).toFixed(1)}¢/contract (needed +${Math.round(LATE_PASS * 100)}¢). It keeps recording, but this idea isn't profitable as-is.`); }
   }
+  { const LV = L.live, lines = [];
+    for (const o of LV.pos.filter(o => Date.now() > o.c + 3 * 60e3)) {
+      let m; try { m = (await kalshi('GET', `/markets/${o.t}`)).market || {}; } catch (e) { continue; }
+      const res = String(m.result || '').toLowerCase(); if (res !== 'yes' && res !== 'no') continue; // real money: keep waiting for Kalshi's result
+      const win = res === o.side ? 1 : 0, pnl = Math.round((win * o.n - o.cost) * 100) / 100;
+      LV.n += 1; LV.w += win; LV.sum = Math.round((LV.sum + pnl) * 100) / 100; LV.cost = Math.round((LV.cost + o.cost) * 100) / 100; LV.pos = LV.pos.filter(y => y !== o);
+      lines.push(`${win ? '✅' : '❌'} ${label(o.t).replace(/ ≥ \$[\d,.]+/, '')} ${o.side.toUpperCase()} @ ${cents(o.px)} ${pnl >= 0 ? '+' : '−'}${money(Math.abs(pnl))}`);
+    }
+    if (lines.length) {
+      parts.push(`💵 REAL money:\n${lines.join('\n')}`); log('LATE LIVE RECORD', `n=${LV.n} w=${LV.w} sum=${LV.sum.toFixed(2)}`);
+      if (CFG.LATE_LIVE === 1 && LV.sum <= -CFG.LATE_STOP) { CFG.LATE_LIVE = 0; LV.stopped = Date.now(); verdicts.push(`🛑 REAL 12th-minute test STOPPED itself: down ${money(-LV.sum)} (limit ${money(CFG.LATE_STOP)}). No more real buys. /set latelive 1 restarts it.`); }
+    } }
   if (!parts.length) return;
   log('LATE RECORD', LATE_VARIANTS.map(x => { const r = lateRec(x.k); return `${x.k} n=${r.n} w=${r.w} sum=${r.sum.toFixed(2)}`; }).join(' | ')); // full totals in the log (Telegram log lines are truncated)
-  await say(`⏰ BUY-THE-WINNER TEST (paper)\n${parts.join('\n')}\n📊 ${LATE_VARIANTS.map(lateLine).join('\n📊 ').replace(/⏰ /g, '')}${verdicts.length ? '\n\n' + verdicts.join('\n') : ''}`);
+  await say(`⏰ BUY-THE-WINNER TEST${L.live.n || L.live.pos.length || CFG.LATE_LIVE === 1 ? '' : ' (paper)'}\n${parts.join('\n')}\n📊 ${LATE_VARIANTS.map(lateLine).join('\n📊 ').replace(/⏰ /g, '')}${L.live.n || CFG.LATE_LIVE === 1 ? '\n' + liveLine() : ''}${verdicts.length ? '\n\n' + verdicts.join('\n') : ''}`);
   await saveSettings().catch(() => {});
 }
 async function paperGrade() {
@@ -1295,6 +1332,8 @@ async function onUpdate(u) {
   if (env.BOT_TEST === '1' && t === '/_news') { await pollNews(); return; }
   if (env.BOT_TEST === '1' && t === '/_clearnewspause') { S.newsPauseUntil = 0; return; }
   if (env.BOT_TEST === '1' && t === '/_clearlearn') { S.learn = {}; return; }
+  if (env.BOT_TEST === '1' && t === '/_livelateclosed') { for (const o of lateState().live.pos) o.c = Date.now() - 4 * 60e3; return; } // tests: real test positions' windows closed
+  if (env.BOT_TEST === '1' && t === '/_livereset') { lateState().live = {}; lateState(); return; } // tests: fresh real record
   if (env.BOT_TEST === '1' && t === '/_laterecover') { lateRecover(); return; } // tests: the v14 rebuild of lost trades
   if (env.BOT_TEST === '1' && /^\/_latewindows \d+$/.test(t)) { lateState().v.m12.nw = +t.split(' ')[1]; lateState().v.m12.cs = []; return; } // tests: jump the window count
   if (env.BOT_TEST === '1' && t === '/_lateclosed') { for (const x of LATE_VARIANTS) for (const o of lateState().v[x.k].pos) o.c = Date.now() - 4 * 60e3; return; } // tests: pretend the test's windows closed // tests: research findings must not leak into later tests

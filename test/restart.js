@@ -1,6 +1,7 @@
 // Restart test: the bot boots with a pinned settings message from a previous run.
 process.env.BOT_TEST = '1';
 const { W, start } = require('./harness');
+const pinnedBlob = () => { const t = W.pinned, zi = t.indexOf('\nZ:'); return zi >= 0 ? JSON.parse(require('zlib').inflateRawSync(Buffer.from(t.slice(zi + 3).trim(), 'base64')).toString()) : JSON.parse(t.slice(t.indexOf('{'))); }; // pinned settings: plain or compressed
 const wait = ms => new Promise(r => setTimeout(r, ms));
 let pass = 0, fail = 0;
 const ok = (c, n, x = '') => { if (c) { pass++; console.log('  ✅', n); } else { fail++; console.log('  ❌', n, x); } };
@@ -47,7 +48,7 @@ W.settlements = [
   ok(msgs().some(m => /🛡 SAFE MODE for the rest of today \(protecting your wallet\): (\d losses in a row|down \$\d)[\s\S]*Still trading — 1 contract at a time/.test(m)), 'losing day switches to safe mode (keeps trading small)', msgs().filter(m => /SAFE|stopped/.test(m)).join(' | '));
   await send('/status'); await wait(500);
   ok(/Auto 15-min: ON · 🛡 SAFE MODE today/.test(last()) && /result −\$6\.00/.test(last()), '/status shows safe mode + day result', last());
-  const blob = JSON.parse(W.pinned.slice(W.pinned.indexOf('{')));
+  const blob = pinnedBlob();
   ok(blob.SC.n === 1 && blob.SC.open.length === 0 && blob.manualLock === true && blob.LED.safe === true, 'scorecard, lock and safe mode saved to pinned');
   ok(msgs().some(m => /📝 Alert check · BTC hourly ≥ \$60,000\.00 YES @ 50¢ → ✅ right/.test(m)), 'graded alert reported');
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);

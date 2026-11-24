@@ -1,6 +1,7 @@
 // End-to-end tests for the Kalshi bot. Run: node test/run.js
 process.env.BOT_TEST = '1';
 const { W, start } = require('./harness');
+const pinnedBlob = () => { const t = W.pinned, zi = t.indexOf('\nZ:'); return zi >= 0 ? JSON.parse(require('zlib').inflateRawSync(Buffer.from(t.slice(zi + 3).trim(), 'base64')).toString()) : JSON.parse(t.slice(t.indexOf('{'))); }; // pinned settings: plain or compressed
 const wait = ms => new Promise(r => setTimeout(r, ms));
 let pass = 0, fail = 0; const failures = [];
 const ok = (cond, name, extra = '') => { if (cond) { pass++; console.log('  ✅', name); } else { fail++; failures.push(name); console.log('  ❌', name, extra); } };
@@ -64,7 +65,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   market('KXBTCD', 'btc', 40, 60040, 0.16); const before = alerts().length;
   await send(post, '/scan'); await wait(500); ok(alerts().length === before, 'paused bot sends no alerts');
   await send(post, '/resume'); await wait(200);
-  ok(JSON.parse(W.pinned.slice(W.pinned.indexOf('{'))).paused === false, 'pause state saved in pinned settings');
+  ok(pinnedBlob().paused === false, 'pause state saved in pinned settings');
 
   console.log('\n4. Alert: analysis, fees, wallet');
   await send(post, '/scan'); await wait(800);
@@ -379,7 +380,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   await send(post, '/_research'); await wait(15000);
   const rm = msgs().find(m => /🧪 RESEARCH UPDATE/.test(m.text));
   ok(rm && /BTC 15-min:/.test(rm.text) && /ETH hourly:/.test(rm.text), 'research report sent for BTC/ETH 15-min + hourly', rm && rm.text);
-  const lrn = JSON.parse(W.pinned.slice(W.pinned.indexOf('{'))).LRN || {};
+  const lrn = pinnedBlob().LRN || {};
   ok(lrn.BTC && lrn.BTC.m15 && typeof lrn.BTC.m15.k === 'number', 'learned parameters saved (survive restarts)');
   ok(lrn.BTC && lrn.BTC.m15 && lrn.BTC.m15.adopt === false, 'no pattern adopted from patternless data (no false discovery)', JSON.stringify(lrn.BTC && lrn.BTC.m15));
   await send(post, '/research'); await wait(300); ok(/🧪 RESEARCH UPDATE/.test(lastMsg().text), '/research shows latest findings');
@@ -388,7 +389,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   console.log('\n12. Scorecard');
   const mS = market('KXETHD', 'eth', 30, 1678, 0.16);
   await send(post, '/scan'); await wait(800);
-  const blob = () => JSON.parse(W.pinned.slice(W.pinned.indexOf('{')));
+  const blob = () => pinnedBlob();
   ok(blob().SC.open.some(o => o.t === mS.ticker), 'alert recorded in scorecard (saved in pinned)');
   ok(blob().SC.ev[mS.event_ticker], 'alerted window saved (no dups after restart)');
   mS.close_time = new Date(Date.now() - 10 * 60e3).toISOString(); mS.result = 'yes';
