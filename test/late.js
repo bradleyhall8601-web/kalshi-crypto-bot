@@ -163,6 +163,17 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(/hourly last-12-min test/.test(last()) && /daily last-12-min test/.test(last()), '/paper shows the hourly and daily tests', last());
   ok(W.pinned.length <= 4096, `still fits Telegram's limit (${W.pinned.length} chars)`);
 
+  console.log('\n10. Daily: strike pinned when the day is listed, saved for restarts, leader bought with 12 min left');
+  let fivePM = Math.ceil(Date.now() / 3600e3) * 3600e3; while (new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(fivePM) !== '17') fivePM += 3600e3;
+  for (const k of Object.keys(W.markets)) if (k.startsWith('KXETHD')) delete W.markets[k];
+  const dEv = 'KXETHD-DAILYTEST'; const ds = ladder(dEv, 60, [0.9, 0.5, 0.1]); ds.forEach(m => { m.close_time = new Date(fivePM).toISOString(); });
+  await send('/_ladderat KXETHD 800'); await wait(2500);
+  const dA = (pinned().PAPERS.late || {}).dA || {};
+  ok(dA[dEv] && dA[dEv].t === ds[1].ticker, 'daily: at-the-money strike pinned and saved in the settings (survives a restart)', JSON.stringify(dA));
+  reclose(ds, 0, [0.99, 0.12, 0.02]); ds.forEach(m => { m.close_time = new Date(fivePM).toISOString(); });
+  await send('/_ladderat KXETHD 11.5'); await wait(2500);
+  ok(L('d12').pos.some(o => o.t === ds[1].ticker && o.side === 'no'), 'daily: buys the leader (NO) on the pinned strike with 12 min left', JSON.stringify(L('d12').pos));
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('TEST CRASH', e); process.exit(1); });
