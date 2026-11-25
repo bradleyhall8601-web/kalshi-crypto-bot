@@ -886,7 +886,7 @@ async function lateEntry(m, mins, k, cond) {
   const todo = xs.filter(x => x && !L.seen[x.k + '|' + m.event_ticker] && !L.v[x.k].pos.some(o => o.ev === m.event_ticker));
   if (!todo.length || S.paused || eventPause()) return;
   try { m = await withLiveQuote(m); } catch (e) { return; }
-  const yb = d(m, 'yes_bid'), ya = d(m, 'yes_ask'), na = d(m, 'no_ask'); if (!(ya > 0 && na > 0 && yb >= 0)) return;
+  const yb = d(m, 'yes_bid'), ya = d(m, 'yes_ask'), na = d(m, 'no_ask'); if (!(ya > 0 && na > 0 && yb >= 0)) { if (k && !(S.lateNoPx = S.lateNoPx || {})[k + '|' + m.event_ticker]) { S.lateNoPx[k + '|' + m.event_ticker] = 1; log('LATE skip', k, m.ticker, 'no seller on one side (already decided)', 'yes ask', ya, 'no ask', na); } return; } // 11/25 3:48 PM: 6 of 7 daily strikes were skipped without a word
   const mid = (yb + ya) / 2; let side = null, px = null;
   if (mid >= 0.53) { side = 'yes'; px = ya; } else if (mid <= 0.47) { side = 'no'; px = na; }
   for (const [kk, t] of Object.entries(L.seen)) if (Date.now() - t > 6 * 3600e3) delete L.seen[kk];
@@ -926,7 +926,7 @@ async function lateLadder(markets, now) {
       let best = null; for (const m of ms) { const yb = d(m, 'yes_bid'), ya = d(m, 'yes_ask'); if (!(ya > 0 && yb >= 0)) continue; const gap = Math.abs((yb + ya) / 2 - 0.5); if (!best || gap < best.gap) best = { t: m.ticker, gap }; }
       if (best) { A[ev] = { t: best.t, c: close }; log('LATE anchor', daily ? 'd12' : 'h12', best.t, `${Math.round(mins)} min left`); await saveSettings().catch(() => {}); }
     }
-    if (A[ev] && mins >= 10 && mins <= 12) { /* 2-minute entry window so one late scan or a short pause doesn't miss the hour */ const m = ms.find(x => x.ticker === A[ev].t); if (m) await lateEntry(m, mins, daily ? 'd12' : 'h12'); }
+    if (A[ev] && mins >= 10 && mins <= 12) { /* 2-minute entry window so one late scan or a short pause doesn't miss the hour */ const m = ms.find(x => x.ticker === A[ev].t); if (m) await lateEntry(m, mins, daily ? 'd12' : 'h12'); else log('LATE skip', daily ? 'd12' : 'h12', A[ev].t, 'anchored strike no longer listed'); }
   }
   for (const A of [HA, DA]) for (const [ev, a] of Object.entries(A)) if (now > a.c) delete A[ev]; // an anchor is only needed until its window closes (keeps the saved settings small)
 }
