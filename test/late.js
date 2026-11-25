@@ -168,7 +168,7 @@ W.shards = { 0: 0.66, 2: 0 };
   let fivePM = Math.ceil(Date.now() / 3600e3) * 3600e3; while (new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(fivePM) !== '17') fivePM += 3600e3;
   for (const k of Object.keys(W.markets)) if (k.startsWith('KXETHD')) delete W.markets[k];
   const dEv = 'KXETHD-DAILYTEST'; const ds = ladder(dEv, 60, [0.9, 0.5, 0.1]); ds.forEach(m => { m.close_time = new Date(fivePM).toISOString(); });
-  await send('/_ladderat KXETHD 800'); await wait(2500);
+  await send('/_ladderat KXETHD 800'); await wait(5000); // the pinned save can lag a few seconds behind
   const dA = (pinned().PAPERS.late || {}).dA || {};
   ok(dA[dEv] && dA[dEv].t === ds[1].ticker, 'daily: at-the-money strike pinned and saved in the settings (survives a restart)', JSON.stringify(dA));
   reclose(ds, 0, [0.99, 0.12, 0.02]); ds.forEach(m => { m.close_time = new Date(fivePM).toISOString(); });
