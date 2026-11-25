@@ -131,7 +131,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 16; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 17; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -188,6 +188,7 @@ async function loadSettings() {
     if (blob.LANES && typeof blob.LANES === 'object') S.lanes = blob.LANES;
     if (blob.CALFIT && typeof blob.CALFIT === "object") S.cal = blob.CALFIT;
     if (blob.LED && typeof blob.LED.spent === 'number') S.led = { ...newLed(blob.LED.day), ...blob.LED };
+    if (!(blob.v >= 17) && env.BOT_TEST !== '1' && S.led && String(S.led.day) === '1795586400' && S.led.w >= 4) { S.led.w -= 4; S.led.pnl = Math.round((S.led.pnl - 1.09) * 100) / 100; log('LED FIX', 'removed the 12:45 PM CT results counted twice on 11/25 (4W, +$1.09)'); setTimeout(saveSettings, 3000); } // v17: one-time correction of today's tally
     if (S.led.fastOff) { S.led.fastOff = false; S.led.safe = true; setTimeout(() => { saveSettings(); say('🛡 Loss stop switched to SAFE MODE: trading again now — 1 contract at a time, only 5¢+ edges, no always-in. Back to normal size at midnight CT.'); }, 3000); }
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
@@ -312,6 +313,7 @@ async function accountRaw() {
   const stime = s => Date.parse(s.settled_time || s.created_time || 0) || 0;
   if (!(S.setlTs > 0)) S.setlTs = Math.max(Date.now(), ...settles.map(stime)); // first boot: don't replay history
   const fresh = settles.filter(x => stime(x) > S.setlTs).sort((x, y) => stime(x) - stime(y));
+  if (fresh.length) S.setlTs = stime(fresh[fresh.length - 1]); // claim them NOW, before any await: two scans checking the account at once both reported 12:45 PM's results and counted them twice (live 11/25)
   const setl = [];
   for (const x of fresh) {
     const pl = pnlOf(x), res = String(x.market_result || x.result || '').toUpperCase(), tk = x.ticker || x.market_ticker;
@@ -325,7 +327,7 @@ async function accountRaw() {
     await say(`${setl.length > 1 ? `🧾 RESULTS · ${wins}W·${setl.length - wins}L ${net >= 0 ? '+' : '−'}${money(Math.abs(net))}\n` : ''}${setl.map(y => y.line).join('\n')}\n` +
       `📊 Today ${S.led.w}W·${S.led.l}L ${S.led.pnl >= 0 ? '+' : ''}${money(S.led.pnl)} · all-time ${profit >= 0 ? '+' : ''}${money(profit)}`);
   }
-  if (fresh.length) { S.setlTs = stime(fresh[fresh.length - 1]); saveSettings().catch(() => {}); }
+  if (fresh.length) saveSettings().catch(() => {});
   // today's spend = buys filled since midnight CT
   const fills = await pageAll(`/portfolio/fills?min_ts=${startOfTodayCT()}`, 'fills');
   if (fills.length && !S.loggedFill) { S.loggedFill = 1; log('FILLSAMPLE', JSON.stringify(fills[0])); }
@@ -1450,6 +1452,7 @@ async function onUpdate(u) {
   if (env.BOT_TEST === '1' && t === '/_bloat') { const L = lateState(), far = Date.now() + 20 * 3600e3, cs = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'HYPE']; L.hA = {}; L.dA = {}; for (const c of cs) { for (const h of ['21', '22']) L.hA[`KX${c}D-26NOV24${h}`] = { t: `KX${c}D-26NOV24${h}-T59499.99`, c: far }; L.dA[`KX${c}D-26NOV2517`] = { t: `KX${c}D-26NOV2517-T59749.99`, c: far }; } S.pauseStories = Array.from({ length: 3 }, (_, i) => ({ title: 'Gloom overshadows the year-end market! JPMorgan: Escalating military tensions, Federal Reserve tightening, a government shutdown and tariff hikes are converging ' + i, at: Date.now() })); L.live = { ...L.live, n: 145, w: 114, sum: -5.43, cost: 118.47, stopped: Date.now() }; saveSettings(); return; } // tests: production-sized state from the 11/24 overflow
   if (env.BOT_TEST === '1' && t === '/_livelateclosed') { for (const o of lateState().live.pos) o.c = Date.now() - 4 * 60e3; return; } // tests: real test positions' windows closed
   if (env.BOT_TEST === '1' && t === '/_livereset') { lateState().live = {}; lateState(); return; } // tests: fresh real record
+  if (env.BOT_TEST === '1' && t === '/_acct2') { acctCache = null; await Promise.all([account(true), account(true)]); return; } // tests: two scans read the account at the same moment
   if (env.BOT_TEST === '1' && t === '/_lateage') { const L = lateState(), all = [...Object.values(L.v).flatMap(V => V.pos), ...L.live.pos]; if (all.length) { const dt = Date.now() - 4 * 60e3 - Math.max(...all.map(o => o.c)); for (const o of all) o.c += dt; } return; } // tests: every open window closed 4 min ago (windows keep their own close times)
   if (env.BOT_TEST === '1' && t === '/_newsfresh') { S.newsLog.unshift({ title: 'Test: market-moving macro story', level: 'macro', got: Date.now(), at: Date.now() }); return; } // tests: a fresh headline the news filter must see
   if (env.BOT_TEST === '1' && t === '/_newsold') { for (const x of S.newsLog) x.got = 0; return; } // tests: those headlines are old now

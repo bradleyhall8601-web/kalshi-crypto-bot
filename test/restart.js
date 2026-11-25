@@ -50,6 +50,10 @@ W.settlements = [
   const mr = msgs().length; await wait(21000); await send('/scan'); await wait(2500);
   const rs = msgs().slice(mr).filter(m => /🧾 RESULTS|🏆 WIN|💔 LOSS/.test(m));
   ok(rs.length === 1 && /🧾 RESULTS · 1W·1L/.test(rs[0]) && /💔 LOSS/.test(rs[0]) && /🏆 WIN/.test(rs[0]) && /📊 Today/.test(rs[0]), 'settlements that arrive together come as ONE results message', JSON.stringify(rs));
+  W.settlements.push({ ticker: 'KXSOLD-NEW3-T70', settled_time: new Date(Date.now() + 1000).toISOString(), market_result: 'yes', revenue: 100, yes_total_cost: 80, no_total_cost: 0, fee_cost: '0.01' });
+  const mr2 = msgs().length; await send('/_acct2'); await wait(2500);
+  const rs2 = msgs().slice(mr2).filter(m => /KXSOLD-NEW3|SOL/.test(m) && /WIN/.test(m));
+  ok(rs2.length === 1, 'two account checks at the same moment report a settlement once (live 11/25 12:45 PM double count)', JSON.stringify(rs2));
   ok(msgs().some(m => /🛡 SAFE MODE for the rest of today \(protecting your wallet\): (\d losses in a row|down \$\d)[\s\S]*Still trading — 1 contract at a time/.test(m)), 'losing day switches to safe mode (keeps trading small)', msgs().filter(m => /SAFE|stopped/.test(m)).join(' | '));
   await send('/status'); await wait(500);
   ok(/Auto 15-min: ON · 🛡 SAFE MODE today/.test(last()) && /result −\$6\.00/.test(last()), '/status shows safe mode + day result', last());
