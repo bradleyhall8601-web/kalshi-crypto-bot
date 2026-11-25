@@ -28,7 +28,7 @@ const VENUE = /\b(binance|coinbase|kraken|okx|bybit|bitfinex|gemini|tether|usdt|
 const CHAIN = /\b(bitcoin|ethereum|btc|eth) (network|blockchain|chain|core|mainnet|nodes?)\b/i;
 const MAJOR = { test: t => VENUE.test(t) || CHAIN.test(t) };
 // commentary, previews and explainers describe events, they aren't the event: log them, don't pause
-const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week ahead|what|why|how|could|may|might|warns?|warning|concerns?|calls? for|opinion|preview|prediction|forecast|outlook|lessons|report on|case study|maps|risks?|expects?|monitors?|awaits?|awaited|eyed|in focus|forfeiture|seeks?|seizes?|seizure|recover(?:y|ing|s)?|replacement|working with)\b|\?/i;
+const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week ahead|what|why|how|could|may|might|warns?|warning|concerns?|calls? for|opinion|preview|prediction|forecast|outlook|lessons|report on|case study|maps|risks?|expects?|monitors?|awaits?|awaited|eyed|in focus|forfeiture|seeks?|seizes?|seizure|recover(?:y|ing|s)?|replacement|working with|behind|reckoning|victims?|lessons? from|aftermath|sought|fees? to (?:return|unfreeze))\b|\?/i; // 11/25: 'Behind Binance hack, a reckoning…' and 'Tether … sought 20% fees from hack victims' paused trading
 // a macro pause needs US policy itself in the headline (not gold prices in India or a fund manager's view)
 const US_POLICY = /\b(fed|fomc|federal reserve|powell|warsh|cpi|payrolls|nonfarm|jobs report|treasury yields?)\b/i;
 // a bank's or strategist's outlook on rates is a view, not a decision (live 11/25: "Goldman Sachs: The market has already priced in four Federal Reserve rate hikes…" and "BlackRock Sees Only Two Fed Hikes Ahead…" paused trading)

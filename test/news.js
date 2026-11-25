@@ -30,6 +30,10 @@ ok(!pauses('Goldman Sachs: The market has already priced in four Federal Reserve
 ok(!pauses('BlackRock Sees Only Two Fed Hikes Ahead, While Markets Price In Three and Bitcoin Slides - Crypto Briefing'), 'asset-manager view ("Sees… Price In") does not pause (live 11/25 4:00 AM false pause)');
 ok(pauses('Fed unexpectedly hikes rates by 50 basis points as Warsh fights inflation - Reuters'), 'a real surprise Fed hike still pauses after the outlook filter');
 ok(pauses('BlackRock bitcoin ETF halts redemptions after custody breach - Bloomberg'), 'a BlackRock ETF breach still pauses (outlook filter only applies to rate views)');
+ok(!pauses('Behind Binance hack, a reckoning over who controls crypto market - BusinessWorld Online'), 'feature about an old hack ("Behind … a reckoning") does not pause (live 11/25 5:19 AM false pause)');
+ok(!pauses('Tether reportedly sought 20% fees from crypto hack victims to return frozen USDT - Crypto News'), 'hack-victim fee story does not pause (live 11/25 2:09 AM false pause)');
+ok(!pauses('Tether News Today: Will it Really Charge 20% to Unfreeze Hacked Funds? - Coin Gabbar'), 'question about old hacked funds does not pause');
+ok(pauses('Tether freezes withdrawals after USDT depeg - Reuters') || pauses('Tether halts withdrawals after exploit - Reuters'), 'a live Tether halt still pauses');
 // commentary / non-US / explainers no longer pause
 ok(!pauses('Bill Ackman calls for 3% US inflation target, warns Fed rate hikes could trigger recession - ANI News'), 'fund manager opinion does not pause');
 ok(!pauses('MCX gold prices rise Rs 2,800/10g after 5-day fall, silver jumps Rs 3,600/kg despite increasing rate hike - The Economic Times'), 'Indian gold prices do not pause');
