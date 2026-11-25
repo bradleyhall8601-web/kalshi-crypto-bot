@@ -332,7 +332,7 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   await send(post, '/set always 0'); await send(post, '/set auto1h 0'); await wait(300); clearMarkets(); W.shards = { 0: 7, 2: 0 };
 
   console.log('\n11k. Window recap: every window reports traded or why not');
-  clearMarkets(); W.shards = { 0: 7, 2: 0 };
+  clearMarkets(); W.shards = { 0: 7, 2: 0 }; await send(post, '/set quiet 0'); await wait(200);
   const wA = market('KXBTC15M', 'btc', 9, 59970, -0.17, { m: { strike_type: 'greater_or_equal' } });   // good edge -> trades
   const wB = market('KXETH15M', 'eth', 9, 1679.9, -0.02, { m: { strike_type: 'greater_or_equal' } });  // tiny edge -> skip
   await send(post, '/_fasttick'); await wait(2500);
@@ -352,8 +352,14 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(rc2 && /ETH 15-min.*⏭ no edge/.test(rc2.text) && !/ETH 15-min[^⏎\n]*outside/.test(rc2.text), 'recap reports why it skipped while tradable, not the decided tail', rc2 && rc2.text);
   const msgN = msgs().length; await send(post, '/_fasttick'); await wait(800);
   ok(!msgs().slice(msgN).some(m => /WINDOW RECAP/.test(m.text)), 'each window recapped once');
+  await send(post, '/set quiet 1'); await wait(200);
+  const wQ = market('KXETH15M', 'eth', 9, 1679.9, -0.02, { m: { strike_type: 'greater_or_equal' } });   // tiny edge -> skip only
+  await send(post, '/_fasttick'); await wait(2500); const msgQ = msgs().length;
+  wQ.close_time = new Date(Date.now() - 20e3).toISOString(); await send(post, '/_fasttick'); await wait(1500); clearMarkets();
+  ok(!msgs().slice(msgQ).some(m => /WINDOW RECAP/.test(m.text)), 'quiet mode: a window where nothing was bought sends no recap');
 
   console.log('\n11i. News watch');
+  await send(post, '/set quiet 0'); await wait(200);
   W.rss = [{ title: 'Old headline: Bitcoin hits record high', at: Date.now() - 5 * 60e3 }];
   let nm = msgs().length;
   await send(post, '/_news'); await wait(800);
@@ -369,6 +375,13 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(nmsgs.filter(m => /📰 NEWS/.test(m)).length === 1, 'headlines grouped into one message');
   ok(nmsgs.some(m => /🏛 Fed unexpectedly cuts rates.*paused 10 min/.test(m)), 'Fed surprise reported and pauses 10 min');
   ok(!nmsgs.some(m => /bakery/.test(m)), 'irrelevant headline ignored');
+  await send(post, '/set quiet 1'); await wait(200); const nq0 = msgs().length;
+  W.rss.push({ title: 'Gold slips as traders await US inflation data', at: Date.now() });
+  W.rss.push({ title: 'Small DeFi lender exploited for $1M', at: Date.now() });
+  await send(post, '/_news'); await wait(800);
+  ok(!msgs().slice(nq0).some(m => /📰 NEWS/.test(m.text)), 'quiet mode: headlines that pause nothing stay out of Telegram');
+  await send(post, '/news'); await wait(300);
+  ok(/Small DeFi lender exploited/.test(msgs().slice(-1)[0].text), 'quiet headlines are still listed in /news', msgs().slice(-1)[0].text);
   clearMarkets(); market('KXBTC15M', 'btc', 9, 59977, -0.17, { m: { strike_type: 'greater_or_equal' } }); let on = W.orders.length;
   await send(post, '/_fasttick'); await wait(1500);
   ok(W.orders.length === on && msgs().some(m => /⏸📅 Trading paused — news: Major exchange Bybit hacked/.test(m.text)), 'no trades during news pause, pause reported');

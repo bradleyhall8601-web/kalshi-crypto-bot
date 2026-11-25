@@ -135,8 +135,10 @@ if (!RESTARTED) {
 
   console.log('\n5. Shock rules across coins');
   clear(); W.shock = { coin: 'btc', pct: -0.02 }; o0 = W.orders.length;
-  const s1 = market('KXSOL15M', 'sol', 9, 139.93, -0.17);
+  const s1 = market('KXSOL15M', 'sol', 9, 139.93, -0.17); market('KXBNB15M', 'bnb', 9, 609.97, -0.17); market('KXDOGE15M', 'doge', 9, 0.3098, -0.17); const m5 = msgs().length;
   await send('/_fasttick'); await wait(2500);
+  const blk = msgs().slice(m5).filter(m => /🚧/.test(m));
+  ok(blk.length === 1 && /🚧 [A-Z]+(, [A-Z]+)+ trading paused — BTC sudden drop/.test(blk[0]), 'coins paused by the same shock share ONE message (was one per coin)', JSON.stringify(blk));
   await send('/why'); await wait(300);
   ok(!orders().slice(o0).includes(s1.ticker) && /SOL: ⏸ blocked — .*BTC sudden drop/.test(last()), 'a BTC crash pauses SOL too', last());
   clear(); W.shock = { coin: 'sol', pct: -0.03 }; o0 = W.orders.length;

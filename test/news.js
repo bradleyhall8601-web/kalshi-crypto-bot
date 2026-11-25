@@ -26,6 +26,10 @@ ok(!pauses('Strong Security Isn’t Enough to Keep Your Crypto Safe: CoinRabbit 
 ok(!pauses('Bill Ackman Fed Rate Hike Warning Raises US Recession Concerns - TronWeekly'), 'opinion "warning ... concerns" does not pause');
 ok(!pauses("Halted food company's Bitcoin losses swell to $51M - www.thestreet.com"), 'a company holding bitcoin is not a market event');
 ok(!pauses("CoinRabbit maps 5 layers of crypto platform risk with Binance's $6.4 billion hack as case study - Cryptopolitan"), 'case study does not pause');
+ok(!pauses('Goldman Sachs: The market has already priced in four Federal Reserve rate hikes, but Warsh will continue to raise rates in December. - 富途牛牛'), 'bank outlook ("Goldman Sachs: …priced in…") does not pause (live 11/25 7:07 AM false pause)');
+ok(!pauses('BlackRock Sees Only Two Fed Hikes Ahead, While Markets Price In Three and Bitcoin Slides - Crypto Briefing'), 'asset-manager view ("Sees… Price In") does not pause (live 11/25 4:00 AM false pause)');
+ok(pauses('Fed unexpectedly hikes rates by 50 basis points as Warsh fights inflation - Reuters'), 'a real surprise Fed hike still pauses after the outlook filter');
+ok(pauses('BlackRock bitcoin ETF halts redemptions after custody breach - Bloomberg'), 'a BlackRock ETF breach still pauses (outlook filter only applies to rate views)');
 // commentary / non-US / explainers no longer pause
 ok(!pauses('Bill Ackman calls for 3% US inflation target, warns Fed rate hikes could trigger recession - ANI News'), 'fund manager opinion does not pause');
 ok(!pauses('MCX gold prices rise Rs 2,800/10g after 5-day fall, silver jumps Rs 3,600/kg despite increasing rate hike - The Economic Times'), 'Indian gold prices do not pause');

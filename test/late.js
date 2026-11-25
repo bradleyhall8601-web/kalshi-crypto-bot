@@ -1,4 +1,4 @@
-// 10th/12th-minute "buy the winner" tests (paper only, own records). Run: node test/late.js
+// 12th-minute / last-12-min "buy the winner" tests (own records; real money for the 12th-minute). Run: node test/late.js
 process.env.BOT_TEST = '1';
 const { W, start } = require('./harness');
 const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -32,7 +32,7 @@ W.shards = { 0: 0.66, 2: 0 };
   const send = t => post({ message: { chat: { id: 42 }, text: t } });
   const o0 = W.orders.length, hist0 = (pinned().SC || {}).hist || [];
 
-  console.log('\n1. Buys whichever side is winning at the 10th and 12th minute');
+  console.log('\n1. Buys whichever side is winning at the 12th minute');
   const early = market('KXETH15M', 9, 0.80);          // 9 min left: too early for this test
   const up = market('KXBTC15M', 2.9, 0.80);             // YES winning at 80¢
   const down = market('KXSOL15M', 2.9, 0.15);           // NO winning (YES at 15¢ → NO ask 86¢)
@@ -45,8 +45,8 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(pos.some(o => o.t === down.ticker && o.side === 'no' && Math.abs(o.px - 0.86) < 1e-9), 'NO winning → paper buy NO at the ask (86¢)', JSON.stringify(pos));
   ok(!pos.some(o => o.t === tie.ticker), 'no clear leader (50/50) → no trade');
   ok(!pos.some(o => o.t === dear.ticker), 'winner above the max price → no trade');
-  ok(!pos.some(o => o.t === early.ticker) && !L('m10').pos.some(o => o.t === early.ticker), 'nothing before the 10th minute');
-  ok(L('m10').pos.length === 0, 'markets at the 12th minute are not 10th-minute entries');
+  ok(!pos.some(o => o.t === early.ticker), 'nothing 9 minutes before the close');
+  ok(!(((pinned().PAPERS || {}).late || {}).v || {}).m10, '10th-minute test is gone from the saved settings (removed 11/25)');
   ok(W.orders.length === o0, 'paper only: no real orders');
   await send('/_fasttick'); await wait(2500);
   ok(L('m12').pos.filter(o => o.t === up.ticker).length === 1, 'one entry per window (no repeats on later scans)');
@@ -56,7 +56,7 @@ W.shards = { 0: 0.66, 2: 0 };
   delete W.markets[notYet.ticker];
   const ten = market('KXETH15M', 4.8, 0.70);           // 10th minute, YES winning
   await send('/_fasttick'); await wait(3000);
-  ok(L('m10').pos.some(o => o.t === ten.ticker && o.side === 'yes') && !L('m12').pos.some(o => o.t === ten.ticker), '10th-minute entry goes to its own record');
+  ok(!L('m12').pos.some(o => o.t === ten.ticker) && W.orders.length === o0, '10th minute is no longer traded (failed test removed)');
   delete W.markets[ten.ticker];
 
   console.log('\n2. Graded on Kalshi results, separate from the main paper record');
@@ -65,11 +65,11 @@ W.shards = { 0: 0.66, 2: 0 };
   const res = msgs().find(m => /BUY-THE-WINNER TEST/.test(m)) || '';
   ok(/✅ BTC 15-min YES @ 81¢ \+\$0\.18/.test(res), 'winner graded: +19¢ less the taker fee', res);
   ok(/❌ SOL 15-min NO @ 86¢ −\$0\.87/.test(res), 'loser graded: −86¢ less the taker fee', res);
-  ok(/12th-minute test: 2 trades · 1W·1L · −\$0\.69/.test(res) && /10th-minute test: 0 trades/.test(res), 'each variant keeps its own record', res);
+  ok(/12th-minute test: 2 trades · 1W·1L · −\$0\.69/.test(res) && !/10th-minute/.test(res), 'the 12th-minute test keeps its own record (no 10th-minute line)', res);
   ok((pinned().PAPERS.r || []).length === 2, 'main paper record untouched (go-live proof unaffected)');
   ok(((pinned().SC || {}).hist || []).length === hist0.length, 'calibration history untouched');
   await send('/paper'); await wait(300);
-  ok(/⏰ 10th-minute test: 0 trades.*1 open/.test(last()) && /⏰ 12th-minute test: 2 trades/.test(last()), '/paper shows both test records', last());
+  ok(/⏰ 12th-minute test: 2 trades/.test(last()) && !/10th-minute/.test(last()), '/paper shows the 12th-minute record', last());
 
   console.log('\n3. Can be switched off');
   await send('/set late 0'); await wait(300);
@@ -82,7 +82,7 @@ W.shards = { 0: 0.66, 2: 0 };
   for (let k = 0; k < 3; k++) { for (const c of ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'HYPE', 'NEAR', 'ZEC']) { market(`KX${c}15M`, 4.8, 0.8); market(`KX${c}15M`, 2.9, 0.2); } await send('/_fasttick'); await wait(4000); } // 3 windows of open positions (more than ever pile up live)
   const P = pinned();
   ok(W.pinned.length <= 4096, `pinned settings fit Telegram's limit (${W.pinned.length} chars)`);
-  ok(P.PAPERS.late.v.m10.pos.length >= 18 && P.PAPERS.late.v.m12.pos.length >= 18, 'open test positions were saved', JSON.stringify({ m10: P.PAPERS.late.v.m10.pos.length, m12: P.PAPERS.late.v.m12.pos.length }));
+  ok(P.PAPERS.late.v.m12.pos.length >= 18, 'open test positions were saved', JSON.stringify({ m12: P.PAPERS.late.v.m12.pos.length }));
   ok(P.PAPERS.late.v.m12.n === 2 && P.PAPERS.late.v.m12.w === 1 && Math.abs(P.PAPERS.late.v.m12.sum + 0.69) < 1e-9, 'running totals saved (survive restarts)', JSON.stringify(P.PAPERS.late.v.m12));
   ok(!P.PAPERS.late.seen, 'in-memory dedupe map not saved (it overflowed the limit)');
 
@@ -98,18 +98,6 @@ W.shards = { 0: 0.66, 2: 0 };
   settle(v2, 'yes'); await send('/_lateclosed'); await wait(100); await send('/scan'); await wait(5000);
   ok(!/FAILED|PASSED/.test(msgs().filter(m => /BUY-THE-WINNER TEST/.test(m)).slice(-1)[0] || ''), 'verdict is announced only once');
 
-  console.log('\n6. Rebuilds the trades the save bug dropped (v14)');
-  const before = { m10: L('m10').pos.length, m12: L('m12').pos.length };
-  await send('/_laterecover'); await wait(5500);
-  const R = pinned().PAPERS.late.v;
-  ok(R.m10.pos.length - before.m10 === 17 && R.m12.pos.length - before.m12 === 19, '17 + 19 lost trades restored as positions to grade', JSON.stringify({ before, m10: R.m10.pos.length, m12: R.m12.pos.length }));
-  ok(R.m12.pos.some(o => o.t === 'KXBTC15M-26NOV231900-00' && o.side === 'yes' && o.px === 0.97 && o.c === Date.parse('2026-11-24T00:00:00Z')), 'tickers, sides, prices and close times match the logs');
-  ok(R.m10.pos.some(o => o.t === 'KXSOL15M-26NOV231830-30' && o.side === 'no' && o.px === 0.54 && o.c === Date.parse('2026-11-23T23:30:00Z')), 'ticker suffix matches the window minute');
-  await send('/_laterecover'); await wait(5500);
-  ok(pinned().PAPERS.late.v.m12.pos.length === R.m12.pos.length, 'running it twice adds nothing');
-  ok(/rebuilt from the bot's logs/.test(msgs().join('\n')), 'Brad is told about the restore');
-  ok(W.pinned.length <= 4096, `still fits Telegram's limit (${W.pinned.length} chars)`);
-
   console.log('\n7. REAL money 12th-minute strategy (Brad 11/24: go full blown)');
   W.shards[0] = 15.66; W.shards[2] = 0;
   const r0 = W.orders.length;
@@ -120,16 +108,19 @@ W.shards = { 0: 0.66, 2: 0 };
   const real = W.orders.slice(r0);
   ok(real.some(o => o.ticker === lb.ticker && o.side === 'bid' && o.count === '1.00' && o.time_in_force === 'immediate_or_cancel'), 'BTC: real buy of 1 YES at the 12th minute', JSON.stringify(real));
   ok(real.some(o => o.ticker === le.ticker), 'every coin trades, not just BTC');
-  ok(!real.some(o => o.ticker === l10.ticker), '10th-minute (failed test) never uses real money');
-  ok(/💵 REAL BUY \(12th-minute\)/.test(msgs().join('\n')), 'Brad gets a REAL BUY message');
+  ok(!real.some(o => o.ticker === l10.ticker), 'nothing at the 10th minute (removed variant) uses real money');
+  const rb = msgs().filter(m => /💵 REAL BUY \(12th-minute\)/.test(m));
+  ok(rb.length === 1 && /BTC 15-min/.test(rb[0]) && /ETH 15-min/.test(rb[0]) && /2 coins/.test(rb[0]) && /Wallet ≈/.test(rb[0]), 'all the window\'s real buys arrive in ONE message', JSON.stringify(rb));
   ok(L('m12').pos.some(o => o.t === lb.ticker), 'paper record still kept alongside');
   await send('/_fasttick'); await wait(2500);
   ok(W.orders.slice(r0).filter(o => o.ticker === lb.ticker).length === 1, 'one real buy per coin per window');
   settle(lb, 'yes'); settle(le, 'no'); await send('/_lateclosed'); await send('/_livelateclosed'); await wait(100);
   await send('/scan'); await wait(5000);
-  const lm = msgs().filter(m => /REAL money:/.test(m)).slice(-1)[0] || '';
-  ok(/✅ BTC 15-min YES @ 81¢ \+\$0\.17/.test(lm) && /❌ ETH 15-min YES @ 81¢ −\$0\.83/.test(lm), 'real results graded with the real fill price and fee', lm);
+  await until(() => (pinned().PAPERS.late.live || {}).n === 2);
+  const lm = msgs().filter(m => /BUY-THE-WINNER/.test(m)).slice(-1)[0] || '', LVr = pinned().PAPERS.late.live;
+  ok(LVr.n === 2 && LVr.w === 1 && Math.abs(LVr.sum + 0.66) < 1e-9, 'real results graded with the real fill price and fee (+$0.17, −$0.83)', JSON.stringify(LVr));
   ok(/STOPPED itself: down \$0\.66/.test(lm), 'turns itself off after the loss limit', lm);
+  ok(!/REAL money:/.test(msgs().join('\n')), 'real wins/losses are not repeated in the test summary (Kalshi results message covers them)');
   const P7 = pinned(); ok(P7.LATE_LIVE === 0 && P7.PAPERS.late.live.n === 2 && P7.PAPERS.late.live.stopped, 'stop and real record saved', JSON.stringify({ on: P7.LATE_LIVE, live: P7.PAPERS.late.live }));
   const r1 = W.orders.length; market('KXXRP15M', 2.9, 0.80); await send('/_fasttick'); await wait(3000);
   ok(W.orders.length === r1, 'no real buys after the stop');
