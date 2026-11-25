@@ -192,6 +192,14 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(W.fills.some(f => f.ticker === f1.ticker) && W.fills.some(f => f.ticker === f3.ticker), 'the other coins fill normally (YES and NO)');
   await until(() => pinned().PAPERS.late.live.pos.length === 3); const LV11 = pinned().PAPERS.late.live; ok(LV11.pos.length === 3, 'three real positions recorded (BTC, ETH retry, SOL)', JSON.stringify(LV11.pos.map(o => o.t)));
 
+  console.log('\n12. Settings still save at the size that overflowed on 11/24 (anchors + live record + long news titles)');
+  await send('/_bloat');
+  await until(() => ((pinned().PAPERS.late || {}).live || {}).n === 145);
+  const P12 = pinned();
+  ok(W.pinned.length <= 4096 && P12.PAPERS.late.live.n === 145 && P12.PAPERS.late.live.stopped, `saved (${W.pinned.length} chars) with the real record and stop flag intact`, String(W.pinned.length));
+  ok(Object.keys(P12.PAPERS.late.dA || {}).length === 7 && Object.keys(P12.PAPERS.late.hA || {}).length === 14, 'all daily and hourly anchors kept');
+  ok(P12.LATE_LIVE !== undefined && P12.LATE_STOP !== undefined, 'settings themselves never trimmed');
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('TEST CRASH', e); process.exit(1); });

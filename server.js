@@ -139,7 +139,11 @@ async function saveSettingsNow() {
   if (text.length > 4090) { S.sc.hist = (S.sc.hist || []).slice(-120); blob.SC = S.sc; text = zip(); }
   if (text.length > 4090) { blob.PAPERS = { ...blob.PAPERS, r: (S.paper.r || []).slice(-60), late: lateBlob(10) }; text = zip(); }
   if (text.length > 4090) { S.sc.hist = (S.sc.hist || []).slice(-60); blob.SC = S.sc; blob.NPS = blob.NPS.slice(-5); text = zip(); }
-  if (text.length > 4090) { if (Date.now() - (S.bigWarn || 0) > 3600e3) { S.bigWarn = Date.now(); log('SETTINGS TOO BIG', text.length, 'chars — not saved'); } return; }
+  // 11/24: anchors + live record pushed it over again — keep trimming history (never settings, live record, stop flag, verdicts or anchors)
+  if (text.length > 4090) { blob.NPS = (blob.NPS || []).slice(-3).map(x => ({ title: String(x.title).slice(0, 60), at: x.at })); blob.SC = { ...S.sc, hist: (S.sc.hist || []).slice(-30) }; blob.PAPERS = { ...blob.PAPERS, late: lateBlob(5) }; text = zip(); }
+  if (text.length > 4090) { blob.LANES = Object.fromEntries(Object.entries(S.lanes || {}).map(([k, v]) => [k, { ...v, r: (v.r || []).slice(-6) }])); blob.PAPERS = { ...blob.PAPERS, r: (S.paper.r || []).slice(-50) }; text = zip(); }
+  if (text.length > 4090) { delete blob.LRN; blob.SC = { ...S.sc, hist: [] }; text = zip(); } // research results are rebuilt by the next research run
+  if (text.length > 4090) { if (Date.now() - (S.bigWarn || 0) > 3600e3) { S.bigWarn = Date.now(); log('SETTINGS TOO BIG', text.length, 'chars — not saved'); say('⚠️ Settings too big to save — tell Claude.').catch(() => {}); } return; }
   if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok || /not modified/.test(r.error || '')) return; }
   const r = await tg('sendMessage', { chat_id: OWNER, text, disable_notification: true });
   if (r.ok) { pinnedId = r.result.message_id; await tg('pinChatMessage', { chat_id: OWNER, message_id: pinnedId, disable_notification: true }); }
@@ -860,7 +864,7 @@ async function lateLadder(markets, now) {
     }
     if (A[ev] && mins >= 10 && mins <= 12) { /* 2-minute entry window so one late scan or a short pause doesn't miss the hour */ const m = ms.find(x => x.ticker === A[ev].t); if (m) await lateEntry(m, mins, daily ? 'd12' : 'h12'); }
   }
-  for (const A of [HA, DA]) for (const [ev, a] of Object.entries(A)) if (now > a.c + 3600e3) delete A[ev];
+  for (const A of [HA, DA]) for (const [ev, a] of Object.entries(A)) if (now > a.c) delete A[ev]; // an anchor is only needed until its window closes (keeps the saved settings small)
 }
 async function lateGrade() {
   const L = lateState(), parts = [], verdicts = [];
@@ -1362,6 +1366,7 @@ async function onUpdate(u) {
   if (env.BOT_TEST === '1' && t === '/_clearlearn') { S.learn = {}; return; }
   if (env.BOT_TEST === '1' && /^\/_latepass \w+$/.test(t)) { lateState().v[t.split(' ')[1]].verdict = 'pass'; return; } // tests: a variant passed its paper test
   if (env.BOT_TEST === '1' && /^\/_ladderat \w+ [\d.]+$/.test(t)) { const [, ser, ml] = t.split(' '); const ms = await pageAll(`/markets?series_ticker=${ser.toUpperCase()}&status=open`, 'markets'); if (ms.length) await lateLadder(ms, Date.parse(ms[0].close_time) - Number(ml) * 60e3); return; } // tests: run the ladder as if N minutes were left
+  if (env.BOT_TEST === '1' && t === '/_bloat') { const L = lateState(), far = Date.now() + 20 * 3600e3, cs = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'HYPE']; L.hA = {}; L.dA = {}; for (const c of cs) { for (const h of ['21', '22']) L.hA[`KX${c}D-26NOV24${h}`] = { t: `KX${c}D-26NOV24${h}-T59499.99`, c: far }; L.dA[`KX${c}D-26NOV2517`] = { t: `KX${c}D-26NOV2517-T59749.99`, c: far }; } S.pauseStories = Array.from({ length: 3 }, (_, i) => ({ title: 'Gloom overshadows the year-end market! JPMorgan: Escalating military tensions, Federal Reserve tightening, a government shutdown and tariff hikes are converging ' + i, at: Date.now() })); L.live = { ...L.live, n: 145, w: 114, sum: -5.43, cost: 118.47, stopped: Date.now() }; saveSettings(); return; } // tests: production-sized state from the 11/24 overflow
   if (env.BOT_TEST === '1' && t === '/_livelateclosed') { for (const o of lateState().live.pos) o.c = Date.now() - 4 * 60e3; return; } // tests: real test positions' windows closed
   if (env.BOT_TEST === '1' && t === '/_livereset') { lateState().live = {}; lateState(); return; } // tests: fresh real record
   if (env.BOT_TEST === '1' && t === '/_laterecover') { lateRecover(); return; } // tests: the v14 rebuild of lost trades
