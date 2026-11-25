@@ -32,13 +32,16 @@ const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week a
 // a macro pause needs US policy itself in the headline (not gold prices in India or a fund manager's view)
 const US_POLICY = /\b(fed|fomc|federal reserve|powell|warsh|cpi|payrolls|nonfarm|jobs report|treasury yields?)\b/i;
 // a bank's or strategist's outlook on rates is a view, not a decision (live 11/25: "Goldman Sachs: The market has already priced in four Federal Reserve rate hikes…" and "BlackRock Sees Only Two Fed Hikes Ahead…" paused trading)
-const OUTLOOK = /\b(goldman( sachs)?|jp ?morgan|morgan stanley|citi(group)?|ubs|barclays|deutsche bank|bank of america|bofa|wells fargo|hsbc|nomura|rabobank|td securities|soci[eé]t[eé] g[eé]n[eé]rale|bnp paribas|standard chartered|mizuho|economists?|strategists?|sees?|priced in|prices? in|pricing in)\b/i;
+const OUTLOOK = /\b(goldman( sachs)?|jp ?morgan|morgan stanley|citi(group)?|ubs|barclays|deutsche bank|bank of america|bofa|wells fargo|hsbc|nomura|rabobank|td securities|soci[eé]t[eé] g[eé]n[eé]rale|bnp paribas|standard chartered|mizuho|economists?|strategists?|sees?|priced in|prices? in|pricing in|odds|bets|room for|more (?:fed |rate )*(?:hikes|cuts))\b/i; // 11/25 9:10 & 9:34 AM: 'Raises Odds of More Fed Hikes', 'Adds Room for … Rate Hikes' were hours-old data reactions
 const POLICY_SHOCK = /\b(raises|cuts|hikes|surprise|unexpected(ly)?|hotter|cooler|emergency|shock|jumps|surges|plunges)\b/i;
 const headline = title => String(title).replace(/\s+[-–|]\s+[^-–|]+$/, '').replace(/\(\s*[A-Z]{2,6}\s*:\s*[A-Z0-9.]{1,6}\s*\)/g, ''); // drop the " - Outlet" suffix and stock tickers like (ASX:HACK)
 function classify(title) {
   const h = headline(title), event = !NOT_EVENT.test(h);
-  if (CRITICAL.test(h)) return MAJOR.test(h) && event ? { level: 'critical', pauseMin: 15 } : { level: 'critical-minor', pauseMin: 0 };
-  if (MACRO.test(h)) return POLICY_SHOCK.test(h) && US_POLICY.test(h) && event && !OUTLOOK.test(h) ? { level: 'macro', pauseMin: 10 } : { level: 'macro-minor', pauseMin: 0 };
+  const crit = CRITICAL.test(h), macro = MACRO.test(h) && POLICY_SHOCK.test(h) && US_POLICY.test(h) && event && !OUTLOOK.test(h);
+  if (crit && MAJOR.test(h) && event) return { level: 'critical', pauseMin: 15 };
+  if (macro) return { level: 'macro', pauseMin: 10 }; // checked before critical-minor: 'Fed hikes rates … in emergency move' matched 'emergency' and was filed as a minor hack-type story
+  if (crit) return { level: 'critical-minor', pauseMin: 0 };
+  if (MACRO.test(h)) return { level: 'macro-minor', pauseMin: 0 };
   if (MOVE.test(title)) return { level: 'move', pauseMin: 0 };
   return null;
 }

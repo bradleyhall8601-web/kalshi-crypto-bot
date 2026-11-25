@@ -34,6 +34,10 @@ ok(!pauses('Behind Binance hack, a reckoning over who controls crypto market - B
 ok(!pauses('Tether reportedly sought 20% fees from crypto hack victims to return frozen USDT - Crypto News'), 'hack-victim fee story does not pause (live 11/25 2:09 AM false pause)');
 ok(!pauses('Tether News Today: Will it Really Charge 20% to Unfreeze Hacked Funds? - Coin Gabbar'), 'question about old hacked funds does not pause');
 ok(pauses('Tether freezes withdrawals after USDT depeg - Reuters') || pauses('Tether halts withdrawals after exploit - Reuters'), 'a live Tether halt still pauses');
+ok(!pauses("PCE Inflation Hits 3.8%. Strong GDP Growth Raises Odds of More Fed Hikes. - Barron's"), 'data reaction ("Raises Odds of More Fed Hikes") does not pause (live 11/25 9:10 AM; release was 8:30 and already paused by the calendar)');
+ok(!pauses('U.S. Initial Jobless Claims Fall to 189,000 Last Week; Labor Market Stability Adds Room for Federal Reserve Rate Hikes - BigGo Finance'), 'data reaction ("Adds Room for … Rate Hikes") does not pause (live 11/25 9:34 AM false pause)');
+ok(!pauses('Nasdaq plunges 3.8% as AI stocks slide and inflation fuels Fed rate hike bets - Invezz'), 'stock-move story about rate bets does not pause (price shocks are caught by the price checks)');
+ok(pauses('Fed hikes rates by 50 basis points in emergency move - Reuters') && pauses('Fed unexpectedly cuts rates, Warsh signals more - Bloomberg'), 'real Fed moves still pause');
 // commentary / non-US / explainers no longer pause
 ok(!pauses('Bill Ackman calls for 3% US inflation target, warns Fed rate hikes could trigger recession - ANI News'), 'fund manager opinion does not pause');
 ok(!pauses('MCX gold prices rise Rs 2,800/10g after 5-day fall, silver jumps Rs 3,600/kg despite increasing rate hike - The Economic Times'), 'Indian gold prices do not pause');
