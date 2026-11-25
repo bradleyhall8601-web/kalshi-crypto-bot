@@ -35,9 +35,13 @@ const US_POLICY = /\b(fed|fomc|federal reserve|powell|warsh|cpi|payrolls|nonfarm
 const OUTLOOK = /\b(goldman( sachs)?|jp ?morgan|morgan stanley|citi(group)?|ubs|barclays|deutsche bank|bank of america|bofa|wells fargo|hsbc|nomura|rabobank|td securities|soci[eé]t[eé] g[eé]n[eé]rale|bnp paribas|standard chartered|mizuho|economists?|strategists?|sees?|priced in|prices? in|pricing in|odds|bets|room for|more (?:fed |rate )*(?:hikes|cuts))\b/i; // 11/25 9:10 & 9:34 AM: 'Raises Odds of More Fed Hikes', 'Adds Room for … Rate Hikes' were hours-old data reactions
 const POLICY_SHOCK = /\b(raises|cuts|hikes|surprise|unexpected(ly)?|hotter|cooler|emergency|shock|jumps|surges|plunges)\b/i;
 const headline = title => String(title).replace(/\s+[-–|]\s+[^-–|]+$/, '').replace(/\(\s*[A-Z]{2,6}\s*:\s*[A-Z0-9.]{1,6}\s*\)/g, ''); // drop the " - Outlet" suffix and stock tickers like (ASX:HACK)
-function classify(title) {
+// a data headline (PCE, CPI, jobs…) is news only right after its release; hours later it's a reaction story (live 11/25: PCE stories paused trading at 9:10, 9:34 and 10:38 AM CT, the release was 7:30 AM CT)
+const DATA = /\b(pce|cpi|ppi|inflation (gauge|data|report|rate|reading|print|figures?)|preferred (inflation )?gauge|jobless claims|payrolls|nonfarm|jobs report|gdp|retail sales|consumer prices|producer prices)\b/i;
+const FED_MOVE = /\b(fed|fomc|federal reserve)\s+(unexpectedly |surprisingly )?(raises|cuts|hikes)\s+(interest )?rates?\b/i;
+function releaseWindow(ms = Date.now()) { const e = etParts(ms); return !['Sat', 'Sun'].includes(e.wd) && ((e.mins >= 8 * 60 + 30 && e.mins < 9 * 60 + 5) || (e.mins >= 10 * 60 && e.mins < 10 * 60 + 35)); } // 8:30 and 10:00 AM ET releases + 35 min
+function classify(title, now = Date.now()) {
   const h = headline(title), event = !NOT_EVENT.test(h);
-  const crit = CRITICAL.test(h), macro = MACRO.test(h) && POLICY_SHOCK.test(h) && US_POLICY.test(h) && event && !OUTLOOK.test(h);
+  const crit = CRITICAL.test(h), macro = MACRO.test(h) && POLICY_SHOCK.test(h) && US_POLICY.test(h) && event && !OUTLOOK.test(h) && !(DATA.test(h) && !FED_MOVE.test(h) && !releaseWindow(now));
   if (crit && MAJOR.test(h) && event) return { level: 'critical', pauseMin: 15 };
   if (macro) return { level: 'macro', pauseMin: 10 }; // checked before critical-minor: 'Fed hikes rates … in emergency move' matched 'emergency' and was filed as a minor hack-type story
   if (crit) return { level: 'critical-minor', pauseMin: 0 };
@@ -84,4 +88,4 @@ function sameStory(title, recent) {
     let n = 0; for (const w of words(r)) if (a.has(w)) n++; return n >= 2;
   });
 }
-module.exports = { poll, parse, classify, calendarPause, sameStory, FEEDS };
+module.exports = { poll, parse, classify, calendarPause, releaseWindow, sameStory, FEEDS };

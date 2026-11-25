@@ -111,7 +111,8 @@ global.fetch = async (url, o = {}) => {
     if (path.endsWith('/portfolio/events/orders')) {
       const m = (W.live && W.live[b.ticker]) || W.markets[b.ticker];
       if (Math.abs(Number(b.price) * 100 - Math.round(Number(b.price) * 100)) > 1e-6) return J({ error: { code: 'invalid_price', message: 'invalid price' } }, 400); // like Kalshi
-      const yesPx = Number(b.price), count = Number(b.count);
+      const yesPx = Number(b.price); let count = Number(b.count);
+      if (b.time_in_force === 'immediate_or_cancel' && W.partial && W.partial[b.ticker] != null) { count = W.partial[b.ticker]; delete W.partial[b.ticker]; } // tests: only a sliver of the order fills (live 11/25: 0.01 of a contract)
       const costPer = b.side === 'bid' ? yesPx : 1 - yesPx;
       const idx = b.exchange_index ?? 0;
       W.orders.push(b);

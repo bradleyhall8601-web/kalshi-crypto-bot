@@ -3,7 +3,8 @@
 const news = require('../news');
 let pass = 0, fail = 0;
 const ok = (c, name) => { if (c) { pass++; console.log('  ✅', name); } else { fail++; console.log('  ❌', name); } };
-const pauses = t => (news.classify(t) || {}).pauseMin > 0;
+const pauses = (t, ms) => (news.classify(t, ms) || {}).pauseMin > 0;
+const AT_840 = Date.parse('2026-11-25T13:40:00Z'), AT_1138 = Date.parse('2026-11-25T16:38:00Z'); // 8:40 and 11:38 AM ET on a Wednesday
 
 console.log('News pause rules');
 // real events still pause
@@ -19,7 +20,11 @@ ok(pauses("Kraken's BTC/CAD market flash crash caused by liquidity - Pluang"), '
 ok(!pauses('Betashares Cyber ETF (ASX:HACK) Seeks Footing as Fed Rate Bets Shift - Kalkine Media'), 'a stock ticker named HACK is not a hack (live 11/23 false pause)');
 ok(pauses('Bybit hacked: $1.4 billion in ETH stolen - CoinDesk') || pauses('Bybit hack: $1.4 billion in ETH stolen - CoinDesk'), 'a real exchange hack still pauses');
 ok(pauses('Fed raises rates more than expected, stocks tumble - Reuters'), 'a real surprise hike still pauses ("expected" is not commentary)');
-ok(pauses('CPI comes in hotter than expected, Treasury yields jump - Bloomberg'), 'hot CPI pauses');
+ok(pauses('CPI comes in hotter than expected, Treasury yields jump - Bloomberg', AT_840), 'hot CPI pauses right after the 8:30 release');
+ok(!pauses('CPI comes in hotter than expected, Treasury yields jump - Bloomberg', AT_1138), 'the same CPI story hours later does not pause again');
+ok(!pauses("Fed's preferred inflation gauge jumps to 3.8% as Wall Street braces for rate hike - CNBC", AT_1138), 'PCE reaction at 11:38 AM ET does not pause (live 11/25 10:38 AM CT false pause)');
+ok(pauses('Fed unexpectedly hikes rates after hot CPI print - Reuters', AT_1138), 'a real Fed move still pauses at any time, even when it mentions data');
+ok(news.releaseWindow(AT_840) && !news.releaseWindow(AT_1138) && !news.releaseWindow(Date.parse('2026-11-28T13:40:00Z')), 'release window: weekday 8:30–9:05 ET only (not Saturday)');
 ok(!pauses('Chainflip Hack : $12M Stolen In Bitcoin, Ethereum And Stablecoins, 10% Bounty Offered - Crowdfund Insider'), 'small bridge hack that merely mentions bitcoin does not pause');
 ok(pauses('Bitcoin network halted after consensus bug - CoinDesk'), 'bitcoin network halt pauses');
 ok(!pauses('Strong Security Isn’t Enough to Keep Your Crypto Safe: CoinRabbit Report on the Binance Hack - Blockonomi'), 'report about an old hack does not pause');

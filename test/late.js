@@ -191,6 +191,63 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(Object.keys(P12.PAPERS.late.dA || {}).length === 7 && Object.keys(P12.PAPERS.late.hA || {}).length === 14, 'all daily and hourly anchors kept');
   ok(P12.LATE_LIVE !== undefined && P12.LATE_STOP !== undefined, 'settings themselves never trimmed');
 
+  console.log('\n13. 12½-minute test, the four filters, the self-learning switch, partial fills (Brad 11/25: "yes all of that")');
+  for (const k of Object.keys(W.markets)) if (W.markets[k].status === 'open') delete W.markets[k];
+  await send('/_livereset'); await send('/set latestop 10000'); await send('/set latelive 0'); await wait(300);
+  W.shards[0] = 15.66; W.shards[2] = 0;
+  const m125open = async () => { await send('/paper'); await wait(400); const x = last().match(/12½-minute test: [^\n]*· (\d+) open/); return x ? +x[1] : -1; };
+  const k0 = await m125open();
+  const h9 = market('KXBTC15M', 2.9, 0.80);
+  await send('/_fasttick'); await wait(3000);
+  ok(await m125open() === k0 && L('m12').pos.some(o => o.t === h9.ticker), '12th-minute enters at 2.9 min left; 12½-minute waits', last());
+  h9.close_time = new Date(Date.now() + 2.4 * 60e3).toISOString();
+  await send('/_fasttick'); await wait(3000);
+  ok(await m125open() === k0 + 1, '12½-minute enters at 2.4 min left (12:36 into the window)', last());
+  ok(L('m12').pos.filter(o => o.t === h9.ticker).length === 1, 'the 12th-minute entry is not repeated');
+  ok((((pinned().PAPERS.late.v || {}).m125 || {}).pos || []).length === 0, '12½-minute open trades stay in memory (keeps the save small)');
+  ok(['max 2 per side', 'model agrees', 'calm market', 'no fresh news', 'all filters'].every(n => last().includes('🔎 12th-min · ' + n + ':')), '/paper lists every filter record', last());
+  const fl = L('m12').pos.find(o => o.t === h9.ticker);
+  ok(fl && typeof fl.f === 'number' && (fl.f & 4), 'filters recorded on the trade (no fresh news → news filter passes)', JSON.stringify(fl));
+  await send('/_newsfresh');
+  const n1 = market('KXETH15M', 2.9, 0.15); // NO leads at 86¢; ETH ~$1,680 vs a $60,000 strike, so the model is sure NO wins
+  await send('/_fasttick'); await wait(3000);
+  const fn = L('m12').pos.find(o => o.t === n1.ticker);
+  ok(fn && !(fn.f & 4) && (fn.f & 1), 'fresh market-moving headline → news filter skips it; the model agrees with the leader', JSON.stringify(fn));
+  await send('/_newsold');
+  // one window, three coins betting YES and one NO: "max 2 per side" keeps the two YES priced highest
+  const wa = market('KXSOL15M', 2.9, 0.90), wb = market('KXXRP15M', 2.9, 0.70), wc = market('KXDOGE15M', 2.9, 0.15), wd = market('KXZEC15M', 2.9, 0.80);
+  for (const m of [wb, wc, wd]) m.close_time = wa.close_time;
+  await send('/_fasttick'); await wait(4000);
+  ok([wa, wb, wc, wd].every(m => L('m12').pos.some(o => o.t === m.ticker)), 'all four coins entered by the 12th-minute rule', JSON.stringify(L('m12').pos.map(o => o.t)));
+  const q0 = pinned().PAPERS.late.f; await send('/_lateelig cap'); await wait(100);
+  settle(h9, 'yes'); settle(n1, 'no'); settle(wa, 'yes'); settle(wb, 'no'); settle(wc, 'no'); settle(wd, 'yes');
+  await send('/_lateage'); await send('/scan'); await wait(6000);
+  await until(() => (pinned().PAPERS.late.f.news || {}).n >= (q0.news.n || 0) + 5);
+  const q1 = pinned().PAPERS.late.f;
+  ok(q1.news.n - q0.news.n === 5, 'news filter record: the 5 trades without fresh news', JSON.stringify({ before: q0.news, after: q1.news }));
+  ok(q1.cap.n === 60 + 5 && Math.abs(q1.cap.sum - (3 + 0.18 + 0.13 + 0.08 + 0.13 + 0.18)) < 0.02, 'max-2-per-side record: XRP (3rd YES, cheapest) left out of the window', JSON.stringify(q1.cap));
+  const sw = msgs().filter(m => /SELF-LEARNING SWITCH/.test(m)).slice(-1)[0] || '';
+  ok(/now follows "12th-min · max 2 per side"/.test(sw) && pinned().PAPERS.late.ch === 'cap', 'a rule proven over 50+ windows at +2¢ takes over real money (and it is saved)', sw);
+  // real money now follows "max 2 per side": only the two YES priced highest are bought; a sliver fill is topped up
+  await send('/set latelive 1'); await wait(300);
+  const r13 = W.orders.length;
+  const xa = market('KXSOL15M', 2.9, 0.90), xb = market('KXXRP15M', 2.9, 0.70), xc = market('KXDOGE15M', 2.9, 0.15), xd = market('KXZEC15M', 2.9, 0.80);
+  for (const m of [xb, xc, xd]) m.close_time = xa.close_time;
+  W.partial = { [xd.ticker]: 0.01 };
+  await send('/_fasttick'); await wait(5000);
+  const o13 = W.orders.slice(r13);
+  ok(o13.some(o => o.ticker === xa.ticker) && o13.some(o => o.ticker === xc.ticker) && !o13.some(o => o.ticker === xb.ticker), 'real buys: top-2 YES + the NO; the cheapest YES is skipped', JSON.stringify(o13.map(o => o.ticker)));
+  const pz = (pinned().PAPERS.late.live.pos || []).find(o => o.t === xd.ticker);
+  ok(o13.filter(o => o.ticker === xd.ticker).length === 2 && pz && Math.abs(pz.n - 1.01) < 1e-9, 'a 0.01-contract sliver is kept and topped up to a full contract', JSON.stringify(pz));
+  ok(msgs().some(m => /💵 REAL BUY \(12th-min · max 2 per side\) · 3 coins/.test(m)), 'the buy message names the rule real money follows', msgs().filter(m => /REAL BUY/.test(m)).slice(-1)[0]);
+  // the rule stops proving itself → real money goes back to the plain 12th-minute rule
+  await send('/_lateinelig cap'); await wait(100);
+  for (const [m, r] of [[xa, 'yes'], [xb, 'no'], [xc, 'no'], [xd, 'yes']]) settle(m, r);
+  await send('/_lateage'); await send('/_livelateclosed'); await send('/scan'); await wait(6000);
+  await until(() => !pinned().PAPERS.late.ch || pinned().PAPERS.late.ch === 'm12');
+  ok(msgs().some(m => /stopped proving itself.*back on the plain 12th-minute rule/.test(m)) && (pinned().PAPERS.late.ch || 'm12') === 'm12', 'back to the 12th-minute rule when the leader fades (money stays on)');
+  await send('/set latelive 0'); await wait(200);
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('TEST CRASH', e); process.exit(1); });
