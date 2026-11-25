@@ -125,6 +125,7 @@ global.fetch = async (url, o = {}) => {
         W.resting[id] = { id, b, remaining: count, pay: costPer, idx, ticker: b.ticker };
         return J({ order_id: id, fill_count: '0.00', remaining_count: count.toFixed(2), ts_ms: Date.now() }, 201);
       }
+      if (W.jump && W.jump[b.ticker]) { const j = W.jump[b.ticker]; delete W.jump[b.ticker]; m.yes_ask_dollars = (Number(m.yes_ask_dollars) + j).toFixed(4); m.yes_bid_dollars = (Number(m.yes_bid_dollars) + j).toFixed(4); m.no_ask_dollars = (Number(m.no_ask_dollars) - j).toFixed(4); } // tests: price jumps just before the order lands
       // fills at the current ask (or better) if the limit allows
       const askYes = Number(m.yes_ask_dollars), askNo = Number(m.no_ask_dollars);
       const can = b.side === 'bid' ? askYes <= yesPx : (1 - askNo) >= yesPx - 1e-9;

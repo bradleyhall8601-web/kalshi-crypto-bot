@@ -351,12 +351,13 @@ async function accountRaw() {
 }
 
 // Kalshi splits cash across exchange shards. Bots must fund the market's shard before ordering.
-async function ensureShardFunds(idx, needed) {
+async function ensureShardFunds(idx, needed, topUp = 0) { // topUp: move enough for several orders at once (one transfer per 15-min window instead of one per coin)
   const shardCash = b => { const r = {}; for (const x of b.balance_breakdown || []) r[x.exchange_index] = Number(x.balance) || 0; return r; };
   let cash = shardCash(await kalshi('GET', '/portfolio/balance'));
   if ((cash[idx] || 0) >= needed) return;
-  const short = Math.round((needed - (cash[idx] || 0) + 0.10) * 100) / 100;
   const [src, srcCash] = Object.entries(cash).filter(([k]) => Number(k) !== idx).sort((a, b) => b[1] - a[1])[0] || [];
+  let short = Math.round((needed - (cash[idx] || 0) + 0.10) * 100) / 100;
+  if (topUp > needed && srcCash > short) short = Math.round(Math.min(srcCash, Math.max(short, topUp - (cash[idx] || 0))) * 100) / 100;
   if (src === undefined || srcCash < short) throw new Error(`Not enough cash: need ${money(needed)} on shard ${idx}, total available is ${money(Object.values(cash).reduce((a, b) => a + b, 0))}`);
   await kalshi('POST', '/portfolio/intra_exchange_instance_transfer', {
     source: 'event_contract', destination: 'event_contract', amount: Math.ceil(short * 10000), // centicents
@@ -401,10 +402,10 @@ function bestLimit(p, ask, need, grace = 0.01) {
   while (limit > floor && limit + feePer(limit) > p - need) limit = Math.round((limit - 0.01) * 100) / 100;
   return limit;
 }
-async function placeBuy({ ticker, side, count, price, auto = false }) {
+async function placeBuy({ ticker, side, count, price, auto = false, fund = 0 }) {
   const m = (await kalshi('GET', `/markets/${ticker}`)).market || {};
   const idx = Number.isInteger(m.exchange_index) ? m.exchange_index : 0;
-  await ensureShardFunds(idx, count * price + feeTotal(count, price) + 0.02);
+  await ensureShardFunds(idx, count * price + feeTotal(count, price) + 0.02, fund);
   price = Math.round(price * 100) / 100; // whole cents only
   const yesPrice = side === 'yes' ? price : 1 - price;
   const body = {
@@ -816,8 +817,17 @@ async function lateLive(m, side, px, name = '12th-minute') {
   const room = Math.min(CFG.MAX_OPEN_PCT * money0 - open, a.cash - Math.max(resv(a), 0.02));
   while (count > 0 && count * lim + feeTotal(count, lim) > room) count--;
   if (count < 1) { log('LATE LIVE skip', m.ticker, 'room', room.toFixed(2), 'cash', a.cash, 'open', open.toFixed(2)); return; }
-  const r = await placeBuy({ ticker: m.ticker, side, count, price: lim, auto: true });
-  if (!(r.filled > 0)) { log('LATE LIVE not filled', m.ticker, side, px, 'limit', lim); return; }
+  let r = await placeBuy({ ticker: m.ticker, side, count, price: lim, auto: true, fund: room });
+  if (!(r.filled > 0)) { // missed: usually the leader got stronger in the second before the order. Re-quote once and retry if it's still the leader and at most 3¢ (and latemax) higher
+    log('LATE LIVE not filled', m.ticker, side, px, 'limit', lim);
+    let q; try { q = await withLiveQuote(m); } catch (e) { return; }
+    const yb = d(q, 'yes_bid'), ya = d(q, 'yes_ask'), na = d(q, 'no_ask'), mid = (yb + ya) / 2, ask = side === 'yes' ? ya : na;
+    const still = side === 'yes' ? mid >= 0.53 : mid <= 0.47, lim2 = Math.min(CFG.LATE_MAX, Math.round((ask + CFG.LATE_GRACE) * 100) / 100);
+    if (!still || !(ask > 0) || ask > Math.min(CFG.LATE_MAX, px + 0.03) || count * lim2 + feeTotal(count, lim2) > room + 0.03) { log('LATE LIVE no retry', m.ticker, side, 'ask now', ask, still ? '' : 'leader changed'); return; }
+    r = await placeBuy({ ticker: m.ticker, side, count, price: lim2, auto: true });
+    if (!(r.filled > 0)) { log('LATE LIVE retry not filled', m.ticker, side, 'limit', lim2); return; }
+    log('LATE LIVE retry filled', m.ticker, side, r.px);
+  }
   LV.pos = LV.pos.concat([{ t: m.ticker, ev: m.event_ticker, side, px: r.px, n: r.filled, cost: Math.round(r.total * 100) / 100, c: Date.parse(m.close_time) }]);
   log('LATE LIVE BUY', m.ticker, side, r.filled, r.px, r.total);
   await saveSettings().catch(() => {});

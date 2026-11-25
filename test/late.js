@@ -9,6 +9,7 @@ const last = () => msgs().slice(-1)[0] || '';
 const zlib = require('zlib');
 const pinned = () => { const t = W.pinned, zi = t.indexOf('Z:'); return zi >= 0 ? JSON.parse(zlib.inflateRawSync(Buffer.from(t.slice(zi + 2).trim(), 'base64')).toString()) : JSON.parse(t.slice(t.indexOf('{'))); };
 let seq = 0;
+const until = async (f, ms = 10000) => { const t = Date.now(); while (Date.now() - t < ms) { try { if (f()) return true; } catch (e) {} await new Promise(r => setTimeout(r, 200)); } return false; }; // pinned saves can lag under load
 function market(series, mins, yesMid) {
   const ev = `${series}-L${++seq}`, ticker = `${ev}-00`;
   const m = { ticker, event_ticker: ev, close_time: new Date(Date.now() + mins * 60e3).toISOString(), floor_strike: 60000, strike_type: 'greater_or_equal',
@@ -135,10 +136,10 @@ W.shards = { 0: 0.66, 2: 0 };
 
   console.log('\n8. Size grows with the account, capped at 60% in open bets');
   await send('/_livereset'); await send('/set latestop 50'); await send('/set latelive 1'); await wait(300);
-  W.shards[0] = 40; const r2 = W.orders.length;
+  W.shards[0] = 40; W.shards[2] = 0; const r2 = W.orders.length;
   const g1 = market('KXBTC15M', 2.9, 0.80); await send('/_fasttick'); await wait(3500);
   ok(W.orders.slice(r2).some(o => o.ticker === g1.ticker && o.count === '2.00'), '$40 account → 2 contracts per coin', JSON.stringify(W.orders.slice(r2)));
-  await send('/set lateper 1'); await wait(200); W.shards[0] = 10; const r3 = W.orders.length;
+  await send('/set lateper 1'); await wait(200); W.shards[0] = 10; W.shards[2] = 0; const r3 = W.orders.length;
   const g2 = market('KXETH15M', 2.9, 0.80); await send('/_fasttick'); await wait(3500);
   const big = W.orders.slice(r3).find(o => o.ticker === g2.ticker), open7 = 2 * 0.81 + 0.03;
   ok(big && Number(big.count) * 0.81 <= 0.6 * (10 + open7) - open7 + 1e-9 && Number(big.count) >= 1, 'never more than 60% of the money in open bets', JSON.stringify(big));
@@ -152,6 +153,7 @@ W.shards = { 0: 0.66, 2: 0 };
   await send('/scan'); await wait(3000);
   reclose(hs, 11.5, [0.97, 0.80, 0.30]); const rh = W.orders.length;
   await send('/scan'); await wait(3000);
+  await until(() => L('h12').pos.some(o => o.t === hs[1].ticker));
   ok(L('h12').pos.some(o => o.t === hs[1].ticker && o.side === 'yes'), 'hourly: buys the leader on the strike that was at-the-money when the hour opened', JSON.stringify(L('h12').pos));
   ok(!L('h12').pos.some(o => o.t === hs[0].ticker || o.t === hs[2].ticker), 'only that one strike per hour');
   ok(W.orders.length === rh, 'hourly stays paper until it passes its own 50-window test');
@@ -169,11 +171,26 @@ W.shards = { 0: 0.66, 2: 0 };
   for (const k of Object.keys(W.markets)) if (k.startsWith('KXETHD')) delete W.markets[k];
   const dEv = 'KXETHD-DAILYTEST'; const ds = ladder(dEv, 60, [0.9, 0.5, 0.1]); ds.forEach(m => { m.close_time = new Date(fivePM).toISOString(); });
   await send('/_ladderat KXETHD 800'); await wait(5000); // the pinned save can lag a few seconds behind
+  await until(() => ((pinned().PAPERS.late || {}).dA || {})[dEv]);
   const dA = (pinned().PAPERS.late || {}).dA || {};
   ok(dA[dEv] && dA[dEv].t === ds[1].ticker, 'daily: at-the-money strike pinned and saved in the settings (survives a restart)', JSON.stringify(dA));
   reclose(ds, 0, [0.99, 0.12, 0.02]); ds.forEach(m => { m.close_time = new Date(fivePM).toISOString(); });
   await send('/_ladderat KXETHD 11.5'); await wait(2500);
+  await until(() => L('d12').pos.some(o => o.t === ds[1].ticker));
   ok(L('d12').pos.some(o => o.t === ds[1].ticker && o.side === 'no'), 'daily: buys the leader (NO) on the pinned strike with 12 min left', JSON.stringify(L('d12').pos));
+
+  console.log('\n11. Real fills: one transfer per window, one re-quote retry when the price jumps');
+  await send('/_livereset'); await send('/set lateper 15'); await send('/set latestop 50'); await send('/set latelive 1'); await wait(300);
+  W.shards[0] = 15; W.shards[2] = 0; const tr11 = W.transfers.length, or11 = W.orders.length;
+  const f1 = market('KXBTC15M', 2.9, 0.80), f2 = market('KXETH15M', 2.9, 0.80), f3 = market('KXSOL15M', 2.9, 0.20), f4 = market('KXXRP15M', 2.9, 0.80);
+  W.jump = { [f2.ticker]: 0.02, [f4.ticker]: 0.06 };
+  await send('/_fasttick'); await wait(6000);
+  const ords = W.orders.slice(or11);
+  ok(W.transfers.length - tr11 === 1, 'only one shard transfer for the whole window (was one per coin)', `${W.transfers.length - tr11} transfers`);
+  ok(ords.filter(o => o.ticker === f2.ticker).length === 2 && W.fills.some(f => f.ticker === f2.ticker), 'missed by a 2¢ jump → re-quoted and filled on the retry', JSON.stringify(ords.filter(o => o.ticker === f2.ticker)));
+  ok(ords.filter(o => o.ticker === f4.ticker).length === 1 && !W.fills.some(f => f.ticker === f4.ticker), 'jumped 6¢ → no chasing (retry only up to 3¢ higher)');
+  ok(W.fills.some(f => f.ticker === f1.ticker) && W.fills.some(f => f.ticker === f3.ticker), 'the other coins fill normally (YES and NO)');
+  await until(() => pinned().PAPERS.late.live.pos.length === 3); const LV11 = pinned().PAPERS.late.live; ok(LV11.pos.length === 3, 'three real positions recorded (BTC, ETH retry, SOL)', JSON.stringify(LV11.pos.map(o => o.t)));
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
