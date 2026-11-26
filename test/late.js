@@ -384,6 +384,15 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(W.cancels.slice(c0).includes(mid) && !(pinned().PAPERS.late.live.pos || []).some(o => o.t === bM.ticker), 'HYPE: no seller came by 1 min left → bid cancelled, nothing bought', JSON.stringify(W.cancels.slice(c0)));
   ok(!JSON.stringify(pinned().PAPERS.late).includes('lbids'), 'resting late bids are not in the pinned save (memory only; Kalshi expires them)');
   await send('/set latelive 0'); await send('/_champ m12'); await wait(200);
+  // 15e: a picky filter with 50+ windows but only 22 trades is not "proven" (11/25 10 PM: "all filters" was hours from taking real money at 3× size on 22 trades)
+  for (const k of ['m12x', 'm12b', 'news', 'cap', 'm125', 'calm', 'mdl']) await send('/_lateinelig ' + k);
+  await send('/_lateelig all 22'); await wait(200);
+  const sw15 = msgs().filter(m => /SELF-LEARNING SWITCH/.test(m)).length;
+  const ea15 = market('KXSOL15M', 2.9, 0.80);
+  await send('/_fasttick'); await wait(3500);
+  settle(ea15, 'yes'); await send('/_lateage'); await send('/scan'); await wait(6000);
+  await until(() => !L('m12').pos.some(o => o.t === ea15.ticker));
+  ok(L('m12').pos.every(o => o.t !== ea15.ticker) && msgs().filter(m => /SELF-LEARNING SWITCH/.test(m)).length === sw15 && pinned().PAPERS.late.ch !== 'all', '60 windows at +9¢ but only 22 trades: not proven, real money does not switch to it', String(pinned().PAPERS.late.ch));
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
