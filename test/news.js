@@ -19,7 +19,7 @@ ok(!pauses('Binance working with DoJ on recovery of stolen crypto - Breakingthen
 ok(pauses("Kraken's BTC/CAD market flash crash caused by liquidity - Pluang"), 'a live exchange flash crash still pauses');
 ok(!pauses('Betashares Cyber ETF (ASX:HACK) Seeks Footing as Fed Rate Bets Shift - Kalkine Media'), 'a stock ticker named HACK is not a hack (live 11/23 false pause)');
 ok(pauses('Bybit hacked: $1.4 billion in ETH stolen - CoinDesk') || pauses('Bybit hack: $1.4 billion in ETH stolen - CoinDesk'), 'a real exchange hack still pauses');
-ok(pauses('Fed raises rates more than expected, stocks tumble - Reuters'), 'a real surprise hike still pauses ("expected" is not commentary)');
+ok(pauses('Fed raises rates more than expected, stocks tumble - Reuters', Date.parse('2026-12-09T19:05:00Z')), 'a real surprise hike still pauses ("expected" is not commentary; at the Dec 9 decision)');
 ok(pauses('CPI comes in hotter than expected, Treasury yields jump - Bloomberg', AT_840), 'hot CPI pauses right after the 8:30 release');
 ok(!pauses('CPI comes in hotter than expected, Treasury yields jump - Bloomberg', AT_1138), 'the same CPI story hours later does not pause again');
 ok(!pauses("Fed's preferred inflation gauge jumps to 3.8% as Wall Street braces for rate hike - CNBC", AT_1138), 'PCE reaction at 11:38 AM ET does not pause (live 11/25 10:38 AM CT false pause)');
@@ -63,6 +63,18 @@ ok(news.sameStory('US prosecutors seek to forfeit $1.17 billion in stolen USDC f
 ok(news.sameStory('Analytics firm Elliptic detects movement of $247 mln after Binance crypto exchange hack - Reuters', binance), 'Binance hack follow-up (Elliptic) is the same story');
 ok(!news.sameStory('Coinbase hacked, withdrawals halted - CoinDesk', binance), 'a hack at a different venue is a new story');
 ok(!news.sameStory('SEC charges Kraken over staking', ['SEC sues Coinbase over listings']), 'the same regulator acting on different firms is a new story');
+
+// live 11/25 evening: three false pauses cost the 9:00 and 9:15 PM CT windows
+const AT_843PM = Date.parse('2026-11-26T02:43:00Z'), DEC9_205 = Date.parse('2026-12-09T19:05:00Z'), DEC10_10 = Date.parse('2026-12-10T15:00:00Z'), DEC11_10 = Date.parse('2026-12-11T15:00:00Z');
+ok(!pauses('Fed Raises Rates as AI Spending Fuels Inflation - Wisevoter', AT_843PM), '"Fed Raises Rates…" with no Fed meeting today does not pause (live 8:43 PM CT)');
+ok(!pauses('Gold Slips Toward $3,575 as Firm Inflation Keeps Fed Hikes on the Table - BigGo Finance', AT_843PM), '"…Keeps Fed Hikes on the Table" is speculation, not a decision (live 9:03 PM CT)');
+ok(!pauses('SEC Orders CARZIQO to Halt Unregistered Investment Scheme, Pull Mobile App - BitPinas', AT_843PM), 'a regulator halting a small non-crypto scheme does not pause (live 8:55 PM CT)');
+ok(pauses('Fed raises rates by 25 basis points, signals one more hike - Reuters', DEC9_205), 'the real decision (Dec 9, 2:05 PM ET) still pauses');
+ok(pauses('Fed raises rates by 25 basis points, signals one more hike - Reuters', DEC10_10), '…and the morning after');
+ok(!pauses('Fed raises rates by 25 basis points, signals one more hike - Reuters', DEC11_10), '…but not two days later');
+ok(pauses('Fed hikes rates in emergency move - Reuters', AT_843PM), 'an emergency Fed move pauses any day');
+ok(pauses('SEC halts trading in bitcoin ETF - Reuters', AT_843PM) && pauses('SEC sues Coinbase over unregistered exchange - CNBC', AT_843PM) && pauses('Binance halts withdrawals after hack - CoinDesk', AT_843PM), 'crypto regulator actions and exchange halts still pause');
+ok(news.decisionWindow(Date.parse('2027-03-20T15:00:00Z')), 'past the listed FOMC dates the decision filter steps aside (never hides a real decision)');
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

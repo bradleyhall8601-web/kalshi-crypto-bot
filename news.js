@@ -24,24 +24,37 @@ function parse(xml) {
 // pause only when it can move BTC/ETH: major venues, stablecoins, BTC/ETH themselves, or real policy surprises
 // what a hack/halt must hit to move the whole market: a big venue, a stablecoin, a regulator, or the BTC/ETH network itself
 // (a headline that merely mentions bitcoin — "$12M stolen in bitcoin", "food company's bitcoin losses" — is not enough)
-const VENUE = /\b(binance|coinbase|kraken|okx|bybit|bitfinex|gemini|tether|usdt|usdc|circle|blackrock|etf|sec|cftc|us treasury|treasury (department|secretary)|white house)\b/i;
+const VENUE = /\b(binance|coinbase|kraken|okx|bybit|bitfinex|gemini|tether|usdt|usdc|circle|blackrock|etfs?)\b/i;
 const CHAIN = /\b(bitcoin|ethereum|btc|eth) (network|blockchain|chain|core|mainnet|nodes?)\b/i;
-const MAJOR = { test: t => VENUE.test(t) || CHAIN.test(t) };
+// a regulator only counts when crypto is what it's acting on (live 11/25 8:55 PM CT: "SEC Orders CARZIQO to Halt Unregistered Investment Scheme" paused trading 15 min)
+const REGULATOR = /\b(sec|cftc|us treasury|treasury (department|secretary)|white house)\b/i;
+const CRYPTO = /\b(bitcoin|btc|ether(eum)?|eth|crypto(currency|currencies)?|stablecoins?|etfs?|exchanges?)\b/i;
+const MAJOR = { test: t => VENUE.test(t) || CHAIN.test(t) || (REGULATOR.test(t) && CRYPTO.test(t)) };
 // commentary, previews and explainers describe events, they aren't the event: log them, don't pause
 const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week ahead|what|why|how|could|may|might|warns?|warning|concerns?|calls? for|opinion|preview|prediction|forecast|outlook|lessons|report on|case study|maps|risks?|expects?|monitors?|awaits?|awaited|eyed|in focus|forfeiture|seeks?|seizes?|seizure|recover(?:y|ing|s)?|replacement|working with|behind|reckoning|victims?|lessons? from|aftermath|sought|fees? to (?:return|unfreeze))\b|\?/i; // 11/25: 'Behind Binance hack, a reckoning…' and 'Tether … sought 20% fees from hack victims' paused trading
 // a macro pause needs US policy itself in the headline (not gold prices in India or a fund manager's view)
 const US_POLICY = /\b(fed|fomc|federal reserve|powell|warsh|cpi|payrolls|nonfarm|jobs report|treasury yields?)\b/i;
 // a bank's or strategist's outlook on rates is a view, not a decision (live 11/25: "Goldman Sachs: The market has already priced in four Federal Reserve rate hikes…" and "BlackRock Sees Only Two Fed Hikes Ahead…" paused trading)
-const OUTLOOK = /\b(goldman( sachs)?|jp ?morgan|morgan stanley|citi(group)?|ubs|barclays|deutsche bank|bank of america|bofa|wells fargo|hsbc|nomura|rabobank|td securities|soci[eé]t[eé] g[eé]n[eé]rale|bnp paribas|standard chartered|mizuho|economists?|strategists?|sees?|priced in|prices? in|pricing in|odds|bets|room for|more (?:fed |rate )*(?:hikes|cuts))\b/i; // 11/25 9:10 & 9:34 AM: 'Raises Odds of More Fed Hikes', 'Adds Room for … Rate Hikes' were hours-old data reactions
+const OUTLOOK = /\b(goldman( sachs)?|jp ?morgan|morgan stanley|citi(group)?|ubs|barclays|deutsche bank|bank of america|bofa|wells fargo|hsbc|nomura|rabobank|td securities|soci[eé]t[eé] g[eé]n[eé]rale|bnp paribas|standard chartered|mizuho|economists?|strategists?|sees?|priced in|prices? in|pricing in|odds|bets|room for|on the table|more (?:fed |rate )*(?:hikes|cuts))\b/i; // 11/25 9:10 & 9:34 AM: 'Raises Odds of More Fed Hikes', 'Adds Room for … Rate Hikes' were hours-old data reactions; 9:03 PM: '…Keeps Fed Hikes on the Table'
 const POLICY_SHOCK = /\b(raises|cuts|hikes|surprise|unexpected(ly)?|hotter|cooler|emergency|shock|jumps|surges|plunges)\b/i;
 const headline = title => String(title).replace(/\s+[-–|]\s+[^-–|]+$/, '').replace(/\(\s*[A-Z]{2,6}\s*:\s*[A-Z0-9.]{1,6}\s*\)/g, ''); // drop the " - Outlet" suffix and stock tickers like (ASX:HACK)
 // a data headline (PCE, CPI, jobs…) is news only right after its release; hours later it's a reaction story (live 11/25: PCE stories paused trading at 9:10, 9:34 and 10:38 AM CT, the release was 7:30 AM CT)
 const DATA = /\b(pce|cpi|ppi|inflation (gauge|data|report|rate|reading|print|figures?)|preferred (inflation )?gauge|jobless claims|payrolls|nonfarm|jobs report|gdp|retail sales|consumer prices|producer prices)\b/i;
 const FED_MOVE = /\b(fed|fomc|federal reserve)\s+(unexpectedly |surprisingly )?(raises|cuts|hikes)\s+(interest )?rates?\b/i;
 function releaseWindow(ms = Date.now()) { const e = etParts(ms); return !['Sat', 'Sun'].includes(e.wd) && ((e.mins >= 8 * 60 + 30 && e.mins < 9 * 60 + 5) || (e.mins >= 10 * 60 && e.mins < 10 * 60 + 35)); } // 8:30 and 10:00 AM ET releases + 35 min
+// the Fed only decides at its meetings: "Fed raises/holds/hikes…" is news from the decision (2 PM ET) through the next day; any other time it's an old story
+// or an explainer (live 11/25 8:43 & 9:03 PM CT: "Fed Raises Rates as AI Spending Fuels Inflation" and "…Keeps Fed Hikes on the Table" paused trading, no meeting until 12/9)
+const FED_DECIDES = /\b(fed|fomc|federal reserve)\s+(unexpectedly |surprisingly )?(raises|cuts|hikes|holds|lifts|lowers|decision)\b/i;
+const FED_SURPRISE = /\b(emergency|unexpected(ly)?|surprise|surprisingly|inter-?meeting)\b/i; // a surprise move can come any day
+function decisionWindow(ms = Date.now()) {
+  const e = etParts(ms), prev = etParts(ms - 24 * 3600e3), last = FOMC_DECISIONS[FOMC_DECISIONS.length - 1];
+  if (prev.date > last) return true; // past the listed meetings: never hide a real decision (add the next FOMC dates)
+  return (FOMC_DECISIONS.includes(e.date) && e.mins >= 13 * 60 + 55) || FOMC_DECISIONS.includes(prev.date);
+}
 function classify(title, now = Date.now()) {
   const h = headline(title), event = !NOT_EVENT.test(h);
-  const crit = CRITICAL.test(h), macro = MACRO.test(h) && POLICY_SHOCK.test(h) && US_POLICY.test(h) && event && !OUTLOOK.test(h) && !(DATA.test(h) && !FED_MOVE.test(h) && !releaseWindow(now));
+  const crit = CRITICAL.test(h), macro = MACRO.test(h) && POLICY_SHOCK.test(h) && US_POLICY.test(h) && event && !OUTLOOK.test(h) && !(DATA.test(h) && !FED_MOVE.test(h) && !releaseWindow(now))
+    && !(FED_DECIDES.test(h) && !FED_SURPRISE.test(h) && !decisionWindow(now));
   if (crit && MAJOR.test(h) && event) return { level: 'critical', pauseMin: 15 };
   if (macro) return { level: 'macro', pauseMin: 10 }; // checked before critical-minor: 'Fed hikes rates … in emergency move' matched 'emergency' and was filed as a minor hack-type story
   if (crit) return { level: 'critical-minor', pauseMin: 0 };
@@ -88,4 +101,4 @@ function sameStory(title, recent) {
     let n = 0; for (const w of words(r)) if (a.has(w)) n++; return n >= 2;
   });
 }
-module.exports = { poll, parse, classify, calendarPause, releaseWindow, sameStory, FEEDS };
+module.exports = { poll, parse, classify, calendarPause, releaseWindow, decisionWindow, sameStory, FEEDS };
