@@ -259,6 +259,11 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(pA && (pA.f & 128) && !(pA.f & 8) && pB && (pB.f & 8), 'a losing coin (BTC) is benched on its new trades; ETH is not', JSON.stringify({ pA, pB }));
   await send('/paper'); await wait(400);
   ok(/🪑 Benched now: BTC/.test(last()) && /🆓 Free-money scanner today/.test(last()) && /bid 2¢ under test/.test(last()) && /sell early if it flips test/.test(last()), '/paper shows benched coins, the scanner and both new tests', last());
+  // live 11/26 1:15 PM CT: NEAR's block of 25 had just rolled over at −12.9¢/contract (25 + 1 trades) and it was trading again; a coin without a full block yet stays in
+  await send('/_bench NEAR 25 -3.23 1 0.04'); await send('/_bench ZEC 0 0 24 -2'); await send('/paper'); await wait(400);
+  const bl = (last().match(/🪑 Benched now: [^\n]*/) || [''])[0];
+  ok(/NEAR/.test(bl) && /BTC/.test(bl) && !/ZEC/.test(bl), 'a coin stays benched right after its 25-trade block rolls over; under 25 trades it is not judged yet', bl);
+  await send('/_bench NEAR 0 0 0 0'); await send('/_bench ZEC 0 0 0 0'); await wait(100);
   // cheaper bid: ETH's ask comes down to our bid → filled at the bid; BTC's never does → miss at 1 min left
   bB.yes_ask_dollars = '0.7900'; bB.yes_bid_dollars = '0.7700';
   bC.close_time = new Date(Date.now() + 1.5 * 60e3).toISOString(); bC.yes_bid_dollars = '0.4000'; bC.yes_ask_dollars = '0.4200'; // SOL flips: YES bid 40¢ with 1.5 min left
