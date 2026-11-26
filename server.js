@@ -63,6 +63,7 @@ const CFG = {
   KELLY: env.BOT_TEST === '1' ? 0 : 0.5,
   PAPER: 0,          // paper trading: score every trade the bot would make, spend nothing, until the record proves a profit
   QUIET: 1, // Telegram: 1 = only what matters (news only when it pauses trading, window recap only when the main strategy acted); 0 = everything
+  LATE_MIN: 0.60, LATE_AM: 1, // real 15-min money skips leaders under 60¢ and US mornings (6–10 AM CT on US weekdays) — 11/24–26 real record: −4.7¢ and −10.8¢/contract there; paper tests still take them
   LATE: 1, LATE_MAX: 0.97, LATE_LIVE: 0, LATE_STOP: 5, LATE_PER: 15, LATE_GRACE: 0.01, // LATE_LIVE: real-money 12th-minute strategy (all coins), 1 contract per coin per LATE_PER $ of account; turns itself off after LATE_STOP $ lost
   // Brad's test: at the 12th minute of each 15-min market (and 12 min before each hourly/daily close), buy whichever side is winning
   PAPER_PROVE_N: 50, PAPER_PROVE_EDGE: 0.02, // go live after 50+ paper trades averaging +2¢ per contract after fees
@@ -113,6 +114,8 @@ const SETTINGS = {
   lategrace:{ key: 'LATE_GRACE', desc: 'real 12th-minute buys may pay up to this much above the ask so they fill (never above latemax)', min: 0, max: 0.05 },
   lateper:  { key: 'LATE_PER', desc: 'real 12th-minute size: 1 contract per coin for every this many $ in the account', min: 1, max: 10000 },
   latestop: { key: 'LATE_STOP', desc: 'real 12th-minute strategy turns itself off after losing this many $ in total', min: 0.5, max: 10000 },
+  latemin:  { key: 'LATE_MIN', desc: 'real 15-min buys skip a leader priced under this (a coin flip plus the biggest fee)', min: 0.01, max: 0.97 },
+  lateam:   { key: 'LATE_AM', desc: 'real 15-min buys sit out US mornings, 6–10 AM CT on US weekdays (data releases and the stock open flip late leaders): 1 on, 0 off', min: 0, max: 1 },
   latemax:  { key: 'LATE_MAX', desc: 'highest price the buy-the-winner tests will pay for the winning side', min: 0.5, max: 0.99 },
   samedir:  { key: 'MAX_SAME_DIR', desc: 'max bets on the same direction (up/down) closing at the same time, across coins', min: 1, max: 50 },
   reservescale: { key: 'RESERVE_SCALE', desc: 'reserve shrinks with a small account (1 = on: min of $reserve and 10%)', min: 0, max: 1 },
@@ -131,7 +134,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 17; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 18; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -189,6 +192,7 @@ async function loadSettings() {
     if (blob.CALFIT && typeof blob.CALFIT === "object") S.cal = blob.CALFIT;
     if (blob.LED && typeof blob.LED.spent === 'number') S.led = { ...newLed(blob.LED.day), ...blob.LED };
     if (!(blob.v >= 17) && env.BOT_TEST !== '1' && S.led && String(S.led.day) === '1795586400' && S.led.w >= 4) { S.led.w -= 4; S.led.pnl = Math.round((S.led.pnl - 1.09) * 100) / 100; log('LED FIX', 'removed the 12:45 PM CT results counted twice on 11/25 (4W, +$1.09)'); setTimeout(saveSettings, 3000); } // v17: one-time correction of today's tally
+    if (!(blob.v >= 18) && env.BOT_TEST !== '1') setTimeout(() => { saveSettings(); say(`🧠 NEW REAL-MONEY RULES (your call 11/26: "do what's best for profit")\n📊 Your last 283 real trades won about as often as the price said (−1.0¢ per contract after fees). The losses came from two places:\n🌅 US mornings, 6–10 AM CT (data releases + the stock open flip late leaders): −10.8¢ per contract → real money now sits these out on US weekdays\n🪙 Leaders under 60¢ (a coin flip plus the biggest fee): −4.7¢ → skipped\n📏 No more 2×/3× bets: 1 contract per coin, growing with the account\n🧪 Paper tests still take every trade, so the bot keeps learning and switches rules on its own when one proves itself.\n⚙️ Change with /set latemin 0.6 · /set lateam 0`); }, 4000);
     if (S.led.fastOff) { S.led.fastOff = false; S.led.safe = true; setTimeout(() => { saveSettings(); say('🛡 Loss stop switched to SAFE MODE: trading again now — 1 contract at a time, only 5¢+ edges, no always-in. Back to normal size at midnight CT.'); }, 3000); }
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
@@ -844,7 +848,17 @@ const lateLines = () => LATE_VARIANTS.map(x => `${lateLine(x)} · ${lateState().
 // real money: the 12th-minute strategy on every coin, at the same moment and price the paper test buys (Brad funded $15 on 11/24 after the paper test passed: "go full blown")
 // size grows with the account (1 contract per coin per LATE_PER $); never more than MAX_OPEN_PCT of the money in open positions; reserve kept
 // sizing (Brad 11/25 evening): only once the rule real money follows has PROVEN itself (50+ windows at +2¢): 1 contract per $10 instead of $15, and 2× when the model and a calm market agree, 3× when there's no fresh news either
-function lateSize(f) { if (!lateOk(lateChamp())) return { mult: 1, per: CFG.LATE_PER }; const fl = f || 0; return { mult: (fl & 3) === 3 ? ((fl & 4) ? 3 : 2) : 1, per: Math.min(CFG.LATE_PER, 10) }; }
+function lateSize(f) { if (!lateOk(lateChamp())) return { mult: 1, per: CFG.LATE_PER }; return { mult: 1, per: Math.min(CFG.LATE_PER, 10) }; } // 11/26: no 2×/3× — the 3× bets landed on 55¢/68¢ coin flips (−$1.70, −$2.09) and the real record shows win rate ≈ price, so bigger bets only add risk
+// real 15-min money sits out what lost (11/24–26, 283 real trades, win rate ≈ price overall): leaders under 60¢ (−4.7¢/contract: a coin flip plus the
+// biggest fee) and US mornings, 6–10 AM CT on US weekdays (−10.8¢: data releases and the stock open flip late leaders). Paper tests still take them.
+const ctHour = () => S.testHour !== undefined ? S.testHour : Number(new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, hour: '2-digit', hourCycle: 'h23' }).format(new Date()));
+const usMorning = () => !(env.BOT_TEST === '1' && S.testHour === undefined) && (S.testDataDay !== undefined ? S.testDataDay : news.usDataDay()) && ctHour() >= 6 && ctHour() < 10; // tests set the clock themselves
+function lateLiveSkip(m, px) {
+  if (!isFast(String(m.ticker).split('-')[0])) return null;
+  const why = px < CFG.LATE_MIN ? `leader under ${cents(CFG.LATE_MIN)}` : CFG.LATE_AM === 1 && usMorning() ? 'US morning (6–10 AM CT)' : null;
+  if (why) log('LATE LIVE skip', m.ticker, px, why);
+  return why;
+}
 // how many contracts a real 12th-minute order may be: 1 per LATE_PER $ of the money (× mult), capped so open bets (and resting late bids) stay under MAX_OPEN_PCT and the reserve is kept
 async function lateCount(lim, mult, per) {
   const L = lateState(), LV = L.live, a = await account(true), open = LV.pos.reduce((x, o) => x + o.cost, 0) + Object.values(L.lbids || {}).reduce((x, b) => x + Math.max(0, b.n - b.filled) * (b.q + feeTotal(1, b.q)), 0), money0 = a.cash + open;
@@ -855,6 +869,7 @@ async function lateCount(lim, mult, per) {
 }
 async function lateLive(m, side, px, name = '12th-minute', { mult = 1, per = CFG.LATE_PER, exit = false } = {}) {
   const LV = lateState().live;
+  if (lateLiveSkip(m, px)) return;
   if (CFG.LATE_LIVE !== 1 || LV.stopped || LV.pos.some(o => o.ev === m.event_ticker) || Object.values(lateState().lbids || {}).some(b => b.ev === m.event_ticker)) return;
   const lim = Math.max(px, Math.min(CFG.LATE_MAX, Math.round((px + CFG.LATE_GRACE) * 100) / 100)); // live: a cent of room so a 1¢ tick doesn't miss the fill (live 11/24: 3 of 5 missed)
   let { count, room, a, open } = await lateCount(lim, mult, per);
@@ -955,6 +970,7 @@ async function lateBidCheck(m, mins) {
   }
 }
 async function lateBidLive(m, side, px, name, { mult = 1, per = CFG.LATE_PER } = {}) {
+  if (lateLiveSkip(m, px)) return;
   const L = lateState(), LV = L.live, LB = (L.lbids = L.lbids || {}); // memory only (the pinned save has no room); each order expires on Kalshi by itself
   if (CFG.LATE_LIVE !== 1 || LV.stopped || S.paused || LV.pos.some(o => o.ev === m.event_ticker) || Object.values(LB).some(b => b.ev === m.event_ticker)) return;
   const q = lateBidPx(px), close = Date.parse(m.close_time), exp = Math.floor((close - 60e3) / 1000);
@@ -1090,7 +1106,7 @@ function lateReChamp() { // pick the 15-min rule real money follows; returns the
   if (next === cur) return null;
   L.ch = next; log('LATE CHAMP', cur, '->', next);
   return next === 'm12' && !best ? `🧠 SELF-LEARNING: "${lateName(cur)}" stopped proving itself (recent ${pct(cur)}/contract) — real 15-min money is back on the plain 12th-minute rule.`
-    : `🧠 SELF-LEARNING SWITCH: real 15-min money now follows "${lateName(next)}" — recent ${pct(next)}/contract over its last ${lateRecent(lateRecOf(next)).n} trades, ${lateWins(next)} windows (was "${lateName(cur)}" at ${pct(cur)}).\n📈 It's proven, so bets grow: 1 contract per $10 (was $${CFG.LATE_PER}), 2× when the model and a calm market agree, 3× with no fresh news too.`;
+    : `🧠 SELF-LEARNING SWITCH: real 15-min money now follows "${lateName(next)}" — recent ${pct(next)}/contract over its last ${lateRecent(lateRecOf(next)).n} trades, ${lateWins(next)} windows (was "${lateName(cur)}" at ${pct(cur)}).\n📈 It's proven, so bets grow with the account: 1 contract per $10 (was $${CFG.LATE_PER}).`;
 }
 async function lateGrade() {
   const L = lateState(), parts = [], verdicts = []; let graded = false;
@@ -1606,6 +1622,7 @@ async function onUpdate(u) {
   if (env.BOT_TEST === '1' && /^\/_ladderat \w+ [\d.]+$/.test(t)) { const [, ser, ml] = t.split(' '); const ms = await pageAll(`/markets?series_ticker=${ser.toUpperCase()}&status=open`, 'markets'); if (ms.length) await lateLadder(ms, Date.parse(ms[0].close_time) - Number(ml) * 60e3); return; } // tests: run the ladder as if N minutes were left
   if (env.BOT_TEST === '1' && t === '/_bloat') { const L = lateState(), far = Date.now() + 20 * 3600e3, cs = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'HYPE']; L.hA = {}; L.dA = {}; for (const c of cs) { for (const h of ['21', '22']) L.hA[`KX${c}D-26NOV24${h}`] = { t: `KX${c}D-26NOV24${h}-T59499.99`, c: far }; L.dA[`KX${c}D-26NOV2517`] = { t: `KX${c}D-26NOV2517-T59749.99`, c: far }; } S.pauseStories = Array.from({ length: 3 }, (_, i) => ({ title: 'Gloom overshadows the year-end market! JPMorgan: Escalating military tensions, Federal Reserve tightening, a government shutdown and tariff hikes are converging ' + i, at: Date.now() })); L.live = { ...L.live, n: 145, w: 114, sum: -5.43, cost: 118.47, stopped: Date.now() }; saveSettings(); return; } // tests: production-sized state from the 11/24 overflow
   if (env.BOT_TEST === '1' && t === '/_livelateclosed') { for (const o of lateState().live.pos) o.c = Date.now() - 4 * 60e3; return; } // tests: real test positions' windows closed
+  if (env.BOT_TEST === '1' && t.startsWith('/_ctclock ')) { const [, h, dd] = t.split(' '); S.testHour = h === 'off' ? undefined : Number(h); S.testDataDay = dd === undefined ? undefined : dd === '1'; return; } // tests: pretend it's this CT hour (and a US weekday or not)
   if (env.BOT_TEST === '1' && t === '/_clearage') { for (const b of Object.values(S.blk || {})) if (b.clearAt) b.clearAt -= 4 * 60e3; return; } // tests: conditions have been calm for 3+ minutes
   if (env.BOT_TEST === '1' && t.startsWith('/_champ ')) { lateState().ch = t.split(' ')[1]; return; } // tests: make a rule the one real money follows
   if (env.BOT_TEST === '1' && t === '/_livereset') { lateState().live = {}; lateState(); return; } // tests: fresh real record

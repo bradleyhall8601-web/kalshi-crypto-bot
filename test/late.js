@@ -283,8 +283,8 @@ W.shards = { 0: 0.66, 2: 0 };
   await send('/set latelive 1'); await wait(300); const r14 = W.orders.length;
   const sz = market('KXETH15M', 2.9, 0.15); // NO leads at 86¢; the model is sure (ETH ~$1,680 vs a $60,000 strike)
   await send('/_fasttick'); await wait(4000);
-  const zo = W.orders.slice(r14).find(o => o.ticker === sz.ticker), zf = (L('m12').pos.find(o => o.t === sz.ticker) || {}).f || 0, want = (zf & 3) === 3 ? ((zf & 4) ? 3 : 2) : 1;
-  ok(zo && Number(zo.count) === want && want >= 1, `proven rule sizing: ${want} contract(s) (flags ${zf & 7}, $15.66 / $10 = 1 base)`, JSON.stringify(zo));
+  const zo = W.orders.slice(r14).find(o => o.ticker === sz.ticker), zf = (L('m12').pos.find(o => o.t === sz.ticker) || {}).f || 0;
+  ok(zo && Number(zo.count) === 1 && (zf & 7) === 7, `proven rule sizing: 1 contract even on the surest signal (flags ${zf & 7}; no 2×/3× since 11/26), $15.66 / $10 = 1`, JSON.stringify(zo));
   // the free-money scanner: an upside-down ladder (the higher strike priced MORE likely) is a guaranteed gap
   const a0 = (pinned().PAPERS.late.arb || {}).n || 0;
   ladder('KXBTCD-26NOV2520', 40, [0.59, 0.70]);
@@ -393,6 +393,33 @@ W.shards = { 0: 0.66, 2: 0 };
   settle(ea15, 'yes'); await send('/_lateage'); await send('/scan'); await wait(6000);
   await until(() => !L('m12').pos.some(o => o.t === ea15.ticker));
   ok(L('m12').pos.every(o => o.t !== ea15.ticker) && msgs().filter(m => /SELF-LEARNING SWITCH/.test(m)).length === sw15 && pinned().PAPERS.late.ch !== 'all', '60 windows at +9¢ but only 22 trades: not proven, real money does not switch to it', String(pinned().PAPERS.late.ch));
+
+  // 16 (11/26, Brad: "do what's best for profit"): real 15-min money sits out leaders under 60¢ and US mornings; paper still takes them; no 2×/3×
+  console.log('\n16. Real money skips coin flips (<60¢) and US mornings (6–10 AM CT on US weekdays); paper tests still take them');
+  for (const k of Object.keys(W.markets)) if (W.markets[k].status === 'open') delete W.markets[k];
+  await send('/_livereset'); await send('/_champ m12'); await send('/set latelive 1'); await wait(300); W.shards[0] = 15.66;
+  const r16 = W.orders.length, cf = market('KXSOL15M', 2.9, 0.56), ok16 = market('KXXRP15M', 2.9, 0.80); ok16.close_time = cf.close_time;
+  await send('/_fasttick'); await wait(4500);
+  const o16 = W.orders.slice(r16);
+  ok(!o16.some(o => o.ticker === cf.ticker) && L('m12').pos.some(o => o.t === cf.ticker), 'SOL leader at 57¢: no real buy, the paper test still takes it', JSON.stringify(o16.map(o => [o.ticker, o.price])));
+  ok(o16.some(o => o.ticker === ok16.ticker), 'XRP leader at 81¢: real buy as usual');
+  for (const m of [cf, ok16]) delete W.markets[m.ticker];
+  await send('/_ctclock 7 1'); await wait(100);
+  const r16b = W.orders.length, am = market('KXDOGE15M', 2.9, 0.80);
+  await send('/_fasttick'); await wait(4000);
+  ok(!W.orders.slice(r16b).some(o => o.ticker === am.ticker) && L('m12').pos.some(o => o.t === am.ticker), '7 AM CT on a US weekday: no real buy, paper still takes it', JSON.stringify(W.orders.slice(r16b).map(o => o.ticker)));
+  delete W.markets[am.ticker];
+  await send('/_ctclock 7 0'); await wait(100);
+  const r16c = W.orders.length, hol = market('KXBNB15M', 2.9, 0.80);
+  await send('/_fasttick'); await wait(4000);
+  ok(W.orders.slice(r16c).some(o => o.ticker === hol.ticker), '7 AM CT on a weekend or US holiday (no data, no stock open): real buy as usual');
+  delete W.markets[hol.ticker];
+  await send('/_ctclock 11 1'); await wait(100);
+  const r16d = W.orders.length, noon = market('KXHYPE15M', 2.9, 0.80);
+  await send('/_fasttick'); await wait(4000);
+  ok(W.orders.slice(r16d).some(o => o.ticker === noon.ticker), '11 AM CT on a weekday: real buy as usual');
+  delete W.markets[noon.ticker];
+  await send('/_ctclock off'); await send('/set latelive 0'); await wait(200);
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

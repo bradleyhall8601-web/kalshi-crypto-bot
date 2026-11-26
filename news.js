@@ -104,4 +104,5 @@ function sameStory(title, recent) {
     let n = 0; for (const w of words(r)) if (a.has(w)) n++; return n >= 2;
   });
 }
-module.exports = { poll, parse, classify, calendarPause, releaseWindow, decisionWindow, sameStory, FEEDS };
+const usDataDay = (ms = Date.now()) => dataDay(etParts(ms)); // a US weekday that isn't a federal holiday
+module.exports = { poll, parse, classify, calendarPause, releaseWindow, decisionWindow, usDataDay, sameStory, FEEDS };
