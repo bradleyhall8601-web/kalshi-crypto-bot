@@ -82,6 +82,7 @@ ok(!pauses('Binance Hack: Court Docs Reveal 192 Crypto Assets Stolen - Daily Bei
 ok(!pauses('Scammers bait TRON users with frozen USDT, then drain their TRX deposits - CryptoSlate', AT_1130PM), 'a scam draining users is not a market event (live 6:50 AM CT)');
 ok(pauses('Binance hacked: $400M drained from hot wallet - CoinDesk', AT_1130PM) && pauses('Tether freezes redemptions as USDT depegs - Reuters', AT_1130PM), 'a fresh exchange hack / stablecoin depeg still pauses');
 ok(pauses('Kraken files for bankruptcy - Reuters', AT_1130PM) && pauses('Coinbase insolvent, halts withdrawals - Bloomberg', AT_1130PM), '"bankruptcy" and "insolvent" match (they did not: the words were cut short)');
+ok(!pauses('Federal Reserve: Gradual hikes priced – Commerzbank - FXStreet', AT_1130PM) && !pauses('Fed: Two more hikes likely – ING - FXStreet', AT_1130PM), 'bank analyst notes ("– Commerzbank", "– ING") do not pause (live 11/26 8:55 AM CT)');
 ok(!news.calendarPause(Date.parse('2026-11-26T13:30:00Z')), 'no 8:30 AM ET data pause on Thanksgiving (live 7:25 AM CT)');
 ok(news.calendarPause(Date.parse('2026-11-27T13:30:00Z')) && news.calendarPause(Date.parse('2026-11-25T13:30:00Z')), '…but the day before and after still pause at 8:30 ET');
 ok(!news.releaseWindow(Date.parse('2026-12-25T13:40:00Z')) && news.releaseWindow(Date.parse('2026-12-24T13:40:00Z')), 'no release window on Christmas; there is one on Dec 24');
