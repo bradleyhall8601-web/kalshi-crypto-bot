@@ -165,7 +165,7 @@ async function loadSettings() {
     if (Array.isArray(blob.SERIES) && blob.SERIES.length) CFG.SERIES = blob.SERIES;
     if (!(blob.v >= 10) && env.BOT_TEST !== '1') { CFG.TRADE_PCT = 0.06; CFG.DAILY_MIN_EQUITY = 50; CFG.MAKER = 1; CFG.KELLY = 0.5; setTimeout(saveSettings, 2000); } // grow-and-last sizing + limit bids
     if (blob.REST && typeof blob.REST === 'object') S.rest = blob.REST;
-    if (Array.isArray(blob.NPS)) S.pauseStories = blob.NPS.filter(x => x && x.title && Date.now() - x.at < 6 * 3600e3);
+    if (Array.isArray(blob.NPS)) S.pauseStories = blob.NPS.filter(x => x && x.title && Date.now() - x.at < news.VENUE_MS);
     if (blob.PAPERS && typeof blob.PAPERS === 'object') S.paper = { r: blob.PAPERS.r || [], pos: blob.PAPERS.pos || [], bids: blob.PAPERS.bids || {}, since: blob.PAPERS.since || Date.now(), old: blob.PAPERS.old || null, late: blob.PAPERS.late || undefined };
     if (!(blob.v >= 11) && env.BOT_TEST !== '1') { CFG.PAPER = 1; S.paper.since = Date.now(); setTimeout(() => { saveSettings(); say('📄 PAPER TRADING ON — no real money is spent from now on. The bot keeps scanning every market and grades every trade it would have made against Kalshi\'s real results. It switches back to real money by itself after 50+ paper trades averaging +2¢ or better per contract. /paper shows the record.'); }, 3000); }
     if (!(blob.v >= 16) && env.BOT_TEST !== '1' && blob.v >= 15) { CFG.LATE_LIVE = 1; CFG.LATE_STOP = 10000; const LV = lateState().live; delete LV.stopped; LV.base = LV.sum; setTimeout(() => { saveSettings(); say('💵 REAL MONEY BACK ON — 12th-minute strategy, no loss limit (your call, 11/24 8:40 PM).\n🛡 Still never more than 60% of the money in open bets at once.\n⚠️ With no loss limit it can lose the whole balance. /set latelive 0 stops it anytime; /set latestop 5 puts a limit back.'); }, 4500); } // Brad 11/24 8:40 PM: "Take the loss limit off… keep it live"
@@ -1894,8 +1894,8 @@ async function pollNews() {
     const lines = [];
     for (const it of r.fresh) {
       it.got = Date.now(); S.newsLog.unshift(it); S.newsLog = S.newsLog.slice(0, 20); // got: when the bot saw it (the 12th-minute news filter looks back 15 min)
-      S.pauseStories = (S.pauseStories || []).filter(x => Date.now() - x.at < 6 * 3600e3);
-      if (it.pauseMin > 0 && news.sameStory(it.title, S.pauseStories.map(x => x.title))) { it.pauseMin = 0; it.repeat = true; } // already paused for this story
+      S.pauseStories = (S.pauseStories || []).filter(x => Date.now() - x.at < news.VENUE_MS).slice(-30); // 7 days for a venue's hack/halt follow-ups; other matches are 6 h (news.sameStory)
+      if (it.pauseMin > 0 && news.sameStory(it.title, S.pauseStories)) { it.pauseMin = 0; it.repeat = true; } // already paused for this story
       if (it.pauseMin > 0) S.pauseStories.push({ title: it.title, at: Date.now() });
       if (it.pauseMin > 0 && Date.now() + it.pauseMin * 60e3 > S.newsPauseUntil) { S.newsPauseUntil = Date.now() + it.pauseMin * 60e3; S.newsPauseWhy = it.title.slice(0, 80); } // longest pause keeps its reason
       const icon = it.level === 'critical' ? '🚨' : it.level === 'macro' ? '🏛' : it.level.startsWith('critical') ? '⚠️' : it.level.startsWith('macro') ? '🏦' : '📊';

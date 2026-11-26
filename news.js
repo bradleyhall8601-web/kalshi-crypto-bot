@@ -31,7 +31,7 @@ const REGULATOR = /\b(sec|cftc|us treasury|treasury (department|secretary)|white
 const CRYPTO = /\b(bitcoin|btc|ether(eum)?|eth|crypto(currency|currencies)?|stablecoins?|etfs?|exchanges?)\b/i;
 const MAJOR = { test: t => VENUE.test(t) || CHAIN.test(t) || (REGULATOR.test(t) && CRYPTO.test(t)) };
 // commentary, previews and explainers describe events, they aren't the event: log them, don't pause
-const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week ahead|what|why|how|could|may|might|warns?|warning|concerns?|calls? for|opinion|preview|prediction|forecast|outlook|lessons|report on|case study|maps|risks?|expects?|monitors?|awaits?|awaited|eyed|in focus|forfeiture|seeks?|seizes?|seizure|recover(?:y|ing|s)?|replacement|working with|behind|reckoning|victims?|lessons? from|aftermath|sought|fees? to (?:return|unfreeze)|courts?|judge|injunction|freezing order|docs|documents|filings?|phishing|scam(?:s|mers?)?|beware|bait(?:s|ed)?)\b|\?/i; // 11/25: 'Behind Binance hack, a reckoning…' and 'Tether … sought 20% fees from hack victims' paused trading; 11/26: 'Binance hack: court freezes $6.5bn, beware phishing', 'Binance Hack: Court Docs Reveal…' (the Oct 29 hack) and 'Scammers bait TRON users with frozen USDT, then drain…'
+const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week ahead|what|why|how|could|may|might|warns?|warning|concerns?|calls? for|opinion|preview|prediction|forecast|outlook|lessons|report on|case study|maps|risks?|expects?|monitors?|awaits?|awaited|eyed|in focus|forfeiture|seeks?|seizes?|seizure|recover(?:y|ing|s)?|replacement|working with|behind|reckoning|victims?|lessons? from|aftermath|sought|fees? to (?:return|unfreeze)|courts?|judge|injunction|freezing order|docs|documents|filings?|phishing|scam(?:s|mers?)?|beware|bait(?:s|ed)?|asset freeze|secures?)\b|\?/i; // 11/25: 'Behind Binance hack, a reckoning…' and 'Tether … sought 20% fees from hack victims' paused trading; 11/26: 'Binance hack: court freezes $6.5bn, beware phishing', 'Binance Hack: Court Docs Reveal…' (the Oct 29 hack) and 'Scammers bait TRON users with frozen USDT, then drain…'
 // a macro pause needs US policy itself in the headline (not gold prices in India or a fund manager's view)
 const US_POLICY = /\b(fed|fomc|federal reserve|powell|warsh|cpi|payrolls|nonfarm|jobs report|treasury yields?)\b/i;
 // a bank's or strategist's outlook on rates is a view, not a decision (live 11/25: "Goldman Sachs: The market has already priced in four Federal Reserve rate hikes…" and "BlackRock Sees Only Two Fed Hikes Ahead…" paused trading)
@@ -97,12 +97,17 @@ const GENERIC = new Set('the and for with from that this will into over after am
 const words = title => new Set(headline(title).toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(' ').filter(w => w.length >= 3 && !GENERIC.has(w) && !/^\d+$/.test(w)));
 const FIRM = /\b(binance|coinbase|kraken|okx|bybit|bitfinex|gemini|tether|usdt|usdc|circle)\b/gi; // exchanges/stablecoins (regulators act on many firms, so they don't identify a story)
 const venuesOf = t => new Set((headline(t).match(FIRM) || []).map(x => x.toLowerCase()));
-function sameStory(title, recent) {
+// recent: titles (fresh) or { title, at }. A venue's hack/halt follow-ups keep coming for weeks (11/26: Binance's Oct 29 hack paused trading 3 times in
+// 12 h; the 6-hour memory let the third through), so those match for 7 days; any other same-story match is 6 hours.
+const STORY_MS = 6 * 3600e3, VENUE_MS = 7 * 24 * 3600e3;
+function sameStory(title, recent, now = Date.now()) {
   const a = words(title), v = CRITICAL.test(headline(title)) ? venuesOf(title) : new Set();
-  return (recent || []).some(r => {
-    if (v.size && CRITICAL.test(headline(r)) && [...venuesOf(r)].some(x => v.has(x))) return true; // follow-ups on the same venue's hack/halt ("DoJ seeks to recover…", "…moves tied to the Binance hack")
+  return (recent || []).some(x => {
+    const r = typeof x === 'string' ? x : x.title, age = typeof x === 'string' ? 0 : now - x.at;
+    if (v.size && age < VENUE_MS && CRITICAL.test(headline(r)) && [...venuesOf(r)].some(y => v.has(y))) return true; // follow-ups on the same venue's hack/halt ("DoJ seeks to recover…", "…moves tied to the Binance hack")
+    if (age >= STORY_MS) return false;
     let n = 0; for (const w of words(r)) if (a.has(w)) n++; return n >= 2;
   });
 }
 const usDataDay = (ms = Date.now()) => dataDay(etParts(ms)); // a US weekday that isn't a federal holiday
-module.exports = { poll, parse, classify, calendarPause, releaseWindow, decisionWindow, usDataDay, sameStory, FEEDS };
+module.exports = { poll, parse, classify, calendarPause, releaseWindow, decisionWindow, usDataDay, sameStory, VENUE_MS, FEEDS };
