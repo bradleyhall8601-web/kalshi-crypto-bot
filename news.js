@@ -8,7 +8,7 @@ const FEEDS = [
   'https://news.google.com/rss/search?q=federal+reserve+OR+CPI+OR+inflation+OR+tariffs+when:1h&hl=en-US&gl=US&ceid=US:en',
 ];
 // high impact: hacks, outages, regulation shocks, surprise policy
-const CRITICAL = /\b(hack(ed)?|exploit(ed)?|drain(ed)?|stolen|breach|outage|halt(s|ed)?|suspend(s|ed)? (withdrawals|trading)|insolven|bankrupt|depeg|emergency|liquidation cascade|flash crash|sec (sues|charges)|crackdown|ban(s|ned)? (bitcoin|crypto))\b/i;
+const CRITICAL = /\b(hack(ed)?|exploit(ed)?|drain(ed)?|stolen|breach|outage|halt(s|ed)?|suspend(s|ed)? (withdrawals|trading)|insolven(?:t|cy)|bankrupt(?:cy)?|depeg(?:s|ged|ging)?|emergency|liquidation cascade|flash crash|sec (sues|charges)|crackdown|ban(s|ned)? (bitcoin|crypto))\b/i;
 const MACRO = /\b(fomc|federal reserve|fed (unexpectedly |surprisingly )?(raises|cuts|hikes|holds|decision)|powell|warsh|rate (hike|cut)|cpi|inflation (data|report)|jobs report|nonfarm|payrolls|tariff|recession|treasury yields? (jump|surge|spike))\b/i;
 const MOVE = /\b(bitcoin|btc|ether(eum)?|eth|crypto)\b.*\b(plunge|plunges|crash|crashes|soar|soars|surge|surges|tumble|tumbles|spike|spikes|record high|all-time high)\b/i;
 
@@ -31,7 +31,7 @@ const REGULATOR = /\b(sec|cftc|us treasury|treasury (department|secretary)|white
 const CRYPTO = /\b(bitcoin|btc|ether(eum)?|eth|crypto(currency|currencies)?|stablecoins?|etfs?|exchanges?)\b/i;
 const MAJOR = { test: t => VENUE.test(t) || CHAIN.test(t) || (REGULATOR.test(t) && CRYPTO.test(t)) };
 // commentary, previews and explainers describe events, they aren't the event: log them, don't pause
-const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week ahead|what|why|how|could|may|might|warns?|warning|concerns?|calls? for|opinion|preview|prediction|forecast|outlook|lessons|report on|case study|maps|risks?|expects?|monitors?|awaits?|awaited|eyed|in focus|forfeiture|seeks?|seizes?|seizure|recover(?:y|ing|s)?|replacement|working with|behind|reckoning|victims?|lessons? from|aftermath|sought|fees? to (?:return|unfreeze))\b|\?/i; // 11/25: 'Behind Binance hack, a reckoning…' and 'Tether … sought 20% fees from hack victims' paused trading
+const NOT_EVENT = /\b(analysis|analyst|inside|mystery|explained|explainer|week ahead|what|why|how|could|may|might|warns?|warning|concerns?|calls? for|opinion|preview|prediction|forecast|outlook|lessons|report on|case study|maps|risks?|expects?|monitors?|awaits?|awaited|eyed|in focus|forfeiture|seeks?|seizes?|seizure|recover(?:y|ing|s)?|replacement|working with|behind|reckoning|victims?|lessons? from|aftermath|sought|fees? to (?:return|unfreeze)|courts?|judge|injunction|freezing order|docs|documents|filings?|phishing|scam(?:s|mers?)?|beware|bait(?:s|ed)?)\b|\?/i; // 11/25: 'Behind Binance hack, a reckoning…' and 'Tether … sought 20% fees from hack victims' paused trading; 11/26: 'Binance hack: court freezes $6.5bn, beware phishing', 'Binance Hack: Court Docs Reveal…' (the Oct 29 hack) and 'Scammers bait TRON users with frozen USDT, then drain…'
 // a macro pause needs US policy itself in the headline (not gold prices in India or a fund manager's view)
 const US_POLICY = /\b(fed|fomc|federal reserve|powell|warsh|cpi|payrolls|nonfarm|jobs report|treasury yields?)\b/i;
 // a bank's or strategist's outlook on rates is a view, not a decision (live 11/25: "Goldman Sachs: The market has already priced in four Federal Reserve rate hikes…" and "BlackRock Sees Only Two Fed Hikes Ahead…" paused trading)
@@ -41,7 +41,10 @@ const headline = title => String(title).replace(/\s+[-–|]\s+[^-–|]+$/, '').r
 // a data headline (PCE, CPI, jobs…) is news only right after its release; hours later it's a reaction story (live 11/25: PCE stories paused trading at 9:10, 9:34 and 10:38 AM CT, the release was 7:30 AM CT)
 const DATA = /\b(pce|cpi|ppi|inflation (gauge|data|report|rate|reading|print|figures?)|preferred (inflation )?gauge|jobless claims|payrolls|nonfarm|jobs report|gdp|retail sales|consumer prices|producer prices)\b/i;
 const FED_MOVE = /\b(fed|fomc|federal reserve)\s+(unexpectedly |surprisingly )?(raises|cuts|hikes)\s+(interest )?rates?\b/i;
-function releaseWindow(ms = Date.now()) { const e = etParts(ms); return !['Sat', 'Sun'].includes(e.wd) && ((e.mins >= 8 * 60 + 30 && e.mins < 9 * 60 + 5) || (e.mins >= 10 * 60 && e.mins < 10 * 60 + 35)); } // 8:30 and 10:00 AM ET releases + 35 min
+// US federal holidays: no 8:30/10:00 AM ET data (live 11/26 Thanksgiving: the 8:30 pause cost the 7:30 and 7:45 AM CT windows)
+const NO_DATA_DAYS = ['2026-11-26', '2026-12-25', '2027-01-01', '2027-01-18', '2027-02-15', '2027-05-31', '2027-06-18', '2027-07-05', '2027-09-06', '2027-10-11', '2027-11-11', '2027-11-25', '2027-12-24'];
+const dataDay = e => !['Sat', 'Sun'].includes(e.wd) && !NO_DATA_DAYS.includes(e.date);
+function releaseWindow(ms = Date.now()) { const e = etParts(ms); return dataDay(e) && ((e.mins >= 8 * 60 + 30 && e.mins < 9 * 60 + 5) || (e.mins >= 10 * 60 && e.mins < 10 * 60 + 35)); } // 8:30 and 10:00 AM ET releases + 35 min
 // the Fed only decides at its meetings: "Fed raises/holds/hikes…" is news from the decision (2 PM ET) through the next day; any other time it's an old story
 // or an explainer (live 11/25 8:43 & 9:03 PM CT: "Fed Raises Rates as AI Spending Fuels Inflation" and "…Keeps Fed Hikes on the Table" paused trading, no meeting until 12/9)
 const FED_DECIDES = /\b(fed|fomc|federal reserve)\s+(unexpectedly |surprisingly )?(raises|cuts|hikes|holds|lifts|lowers|decision)\b/i;
@@ -70,7 +73,7 @@ function etParts(ms) {
 }
 function calendarPause(ms = Date.now()) {
   const e = etParts(ms);
-  if (!['Sat', 'Sun'].includes(e.wd) && e.mins >= 8 * 60 + 25 && e.mins < 8 * 60 + 45) return 'US economic data release (8:30 AM ET)';
+  if (dataDay(e) && e.mins >= 8 * 60 + 25 && e.mins < 8 * 60 + 45) return 'US economic data release (8:30 AM ET)';
   if (FOMC_DECISIONS.includes(e.date) && e.mins >= 13 * 60 + 50 && e.mins < 14 * 60 + 50) return 'Fed (FOMC) decision & press conference';
   return null;
 }
