@@ -430,7 +430,7 @@ async function placeBuy({ ticker, side, count, price, auto = false, fund = 0 }) 
   const yesPrice = side === 'yes' ? price : 1 - price;
   const body = {
     ticker, side: side === 'yes' ? 'bid' : 'ask',
-    count: String(count) + '.00', price: yesPrice.toFixed(4),
+    count: (Math.floor(count * 100 + 1e-9) / 100).toFixed(2), price: yesPrice.toFixed(4), // whole or fractional contracts (a top-up after a sliver fill)
     time_in_force: 'immediate_or_cancel', self_trade_prevention_type: 'taker_at_cross',
     client_order_id: 'kbot-' + crypto.randomUUID(), exchange_index: idx,
   };
@@ -883,9 +883,10 @@ async function lateLive(m, side, px, name = '12th-minute', { mult = 1, per = CFG
     if (q) {
     const yb = d(q, 'yes_bid'), ya = d(q, 'yes_ask'), na = d(q, 'no_ask'), mid = (yb + ya) / 2, ask = side === 'yes' ? ya : na;
     const still = side === 'yes' ? mid >= 0.53 : mid <= 0.47, lim2 = Math.min(CFG.LATE_MAX, Math.round((ask + CFG.LATE_GRACE) * 100) / 100);
-    if (!still || !(ask > 0) || ask > Math.min(CFG.LATE_MAX, px + 0.03) || count * lim2 + feeTotal(count, lim2) > room + 0.03) { log('LATE LIVE no retry', m.ticker, side, 'ask now', ask, still ? '' : 'leader changed'); if (!keep()) return; }
+    const need = part ? Math.round((count - part.filled) * 100) / 100 : count; // after a sliver, only the rest (live 11/26 12:15 PM: 0.6 + a full 1 = 1.6 HYPE contracts)
+    if (!still || !(ask > 0) || ask > Math.min(CFG.LATE_MAX, px + 0.03) || need * lim2 + feeTotal(need, lim2) > room + 0.03) { log('LATE LIVE no retry', m.ticker, side, 'ask now', ask, still ? '' : 'leader changed'); if (!keep()) return; }
     else {
-    r = await placeBuy({ ticker: m.ticker, side, count, price: lim2, auto: true });
+    r = await placeBuy({ ticker: m.ticker, side, count: need, price: lim2, auto: true });
     if (!(r.filled > 0)) { log('LATE LIVE retry not filled', m.ticker, side, 'limit', lim2); if (!keep()) return; }
     else { log('LATE LIVE retry filled', m.ticker, side, r.px);
       if (part) { const tot = part.total + r.total, n = Math.round((part.filled + r.filled) * 100) / 100; r = { filled: n, total: tot, fees: (part.fees || 0) + (r.fees || 0), px: (part.px * part.filled + r.px * r.filled) / n }; } } }

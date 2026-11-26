@@ -238,7 +238,7 @@ W.shards = { 0: 0.66, 2: 0 };
   const o13 = W.orders.slice(r13);
   ok(o13.some(o => o.ticker === xa.ticker) && o13.some(o => o.ticker === xc.ticker) && !o13.some(o => o.ticker === xb.ticker), 'real buys: top-2 YES + the NO; the cheapest YES is skipped', JSON.stringify(o13.map(o => o.ticker)));
   const pz = (pinned().PAPERS.late.live.pos || []).find(o => o.t === xd.ticker);
-  ok(o13.filter(o => o.ticker === xd.ticker).length === 2 && pz && Math.abs(pz.n - 1.01) < 1e-9, 'a 0.01-contract sliver is kept and topped up to a full contract', JSON.stringify(pz));
+  ok(o13.filter(o => o.ticker === xd.ticker).length === 2 && o13.filter(o => o.ticker === xd.ticker)[1].count === '0.99' && pz && Math.abs(pz.n - 1) < 1e-9, 'a 0.01-contract sliver is kept and topped up with just the other 0.99 (not a whole extra contract: live 11/26 bought 1.6)', JSON.stringify({ pz, orders: o13.filter(o => o.ticker === xd.ticker).map(o => o.count) }));
   ok(msgs().some(m => /💵 REAL BUY \(12th-min · max 2 per side\) · 3 coins/.test(m)), 'the buy message names the rule real money follows', msgs().filter(m => /REAL BUY/.test(m)).slice(-1)[0]);
   // the rule stops proving itself → real money goes back to the plain 12th-minute rule
   await send('/_lateinelig cap'); await wait(100);
