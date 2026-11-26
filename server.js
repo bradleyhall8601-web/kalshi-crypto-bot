@@ -791,11 +791,23 @@ function paperOpen(o) { S.paper.pos = (S.paper.pos || []).concat([o]).slice(-60)
 // Paper only, each variant has its own record: never touches real money, calibration, lane learning or the main go-live proof.
 const LATE_VARIANTS = [{ k: 'm12', name: '12th-minute', lo: 2.25, hi: 3.0 }, // 10th-minute variant removed 11/25: −$22 over 900+ paper trades, failed its test
   { k: 'm125', name: '12½-minute', lo: 2.0, hi: 2.5, mem: true }, // Brad 11/25: buy at 12:30 into the window (open positions kept in memory only: the pinned save has no room)
+  { k: 'm12b', name: '12th-min · bid 2¢ under', lo: 99, hi: -1, mem: true, bid: true }, // Brad 11/25 evening: instead of paying the ask, bid 2¢ lower and only count it if a seller comes down to us before 1 min left (paper only)
+  { k: 'm12x', name: '12th-min · sell early if it flips', lo: 99, hi: -1, mem: true, exit: true }, // Brad 11/25 evening: same buys, but sell at the bid as soon as our side drops to 45¢ or less (it flipped) with 15+ s left (paper only)
   { k: 'h12', name: 'hourly last-12-min', lo: 10, hi: 12, slow: true }, { k: 'd12', name: 'daily last-12-min', lo: 10, hi: 12, slow: true }]; // hourly/daily (Brad 11/24): strike nearest the price when the hour/day opened, buy the leader with 12 min left // minutes LEFT: enter once 10:00 / 12:00 of the 15 have passed
 // Brad 11/25 ("yes all of that"): the same 12th-minute trades, judged by four filters. Each filter keeps its own record from the m12 trades it would have taken (no extra positions to save):
 // bit 1 = the bot's own price model agrees the leader is at least as safe as its price, bit 2 = calm market (no big 5-min swing, not choppy — that coin and BTC), bit 4 = no fresh market-moving news
 const LATE_FILTERS = [{ k: 'cap', name: '12th-min · max 2 per side', need: 0, cap: 8 }, { k: 'mdl', name: '12th-min · model agrees', need: 1 }, { k: 'calm', name: '12th-min · calm market', need: 2 },
-  { k: 'news', name: '12th-min · no fresh news', need: 4 }, { k: 'all', name: '12th-min · all filters', need: 7, cap: 16 }]; // cap: of the coins betting the same way in one window, only the 2 priced highest (one market-wide reversal can't hit 6 at once)
+  { k: 'news', name: '12th-min · no fresh news', need: 4 }, { k: 'all', name: '12th-min · all filters', need: 7, cap: 16 },
+  { k: 'bench', name: '12th-min · skip losing coins/hours', need: 8 | 128 }]; // bit 8 = that coin and that time of day aren't benched; 128 = entered after benching existed
+// benching (Brad 11/25 evening): every 12th-minute paper trade also scores its coin and its time of day (CT); a coin or time block that keeps losing sits out until it recovers
+const BN_BLOCKS = [{ k: 'o', name: 'overnight (12–6 AM)', from: 0 }, { k: 'am', name: 'morning (6–11 AM)', from: 6 }, { k: 'md', name: 'midday (11 AM–2 PM)', from: 11 }, { k: 'pm', name: 'afternoon (2–6 PM)', from: 14 }, { k: 'ev', name: 'evening (6 PM–12 AM)', from: 18 }];
+const ctHourOf = ms => Number(new Date(ms).toLocaleString('en-US', { timeZone: 'America/Chicago', hour: 'numeric', hour12: false })) % 24;
+const bnBlock = ms => { const h = ctHourOf(ms); let b = BN_BLOCKS[0]; for (const x of BN_BLOCKS) if (h >= x.from) b = x; return b; };
+const bnCoin = t => String(t).replace(/^KX/, '').replace(/(15M|D|H)?-.*$/, '');
+const bnAdd = (a, pnl) => { a[2] += 1; a[3] = Math.round((a[3] + pnl) * 100) / 100; if (a[2] >= 25) { a[0] = a[2]; a[1] = a[3]; a[2] = 0; a[3] = 0; } };
+const bnBad = a => { if (!a) return false; const n = a[0] + a[2]; return n >= 30 && (a[1] + a[3]) / n < -0.02; }; // 30+ recent trades averaging worse than −2¢/contract
+const bnState = () => { const L = lateState(); L.bn = L.bn || {}; L.bn.c = L.bn.c || {}; L.bn.t = L.bn.t || {}; return L.bn; };
+const benchedNow = (ms = Date.now()) => { const B = bnState(); return [...Object.entries(B.c).filter(([, a]) => bnBad(a)).map(([c]) => c), ...BN_BLOCKS.filter(x => bnBad(B.t[x.k])).map(x => x.name)]; }; // cap: of the coins betting the same way in one window, only the 2 priced highest (one market-wide reversal can't hit 6 at once)
 const lateB = (R, pnl) => { R.b = R.b || [0, 0, 0, 0]; R.b[2] += 1; R.b[3] = Math.round((R.b[3] + pnl) * 100) / 100; if (R.b[2] >= 25) R.b = [R.b[2], R.b[3], 0, 0]; }; // recent record: last full block of 25 + the current block
 const lateRecent = R => { const b = (R && R.b) || [0, 0, 0, 0], n = b[0] + b[2]; return { n, avg: n ? (b[1] + b[3]) / n : 0 }; };
 const lateState = () => { const L = (S.paper.late = S.paper.late || {}); L.v = L.v || {}; L.seen = L.seen || {};
@@ -807,28 +819,32 @@ const lateState = () => { const L = (S.paper.late = S.paper.late || {}); L.v = L
   const LV = (L.live = L.live || {}); LV.pos = LV.pos || []; LV.n = LV.n || 0; LV.w = LV.w || 0; LV.sum = LV.sum || 0; LV.cost = LV.cost || 0; // real-money 12th-minute test
   return L; };
 // what goes in the pinned settings: totals + recent results + open positions (the "seen" map stays in memory — it made the save too big for Telegram)
-const lateBlob = (keep = 30) => { const L = lateState(); return { v: Object.fromEntries(LATE_VARIANTS.map(x => { const V = L.v[x.k]; return [x.k, { n: V.n, w: V.w, sum: V.sum, nw: V.nw, cs: V.cs.slice(-4), b: V.b, ...(V.verdict ? { verdict: V.verdict } : {}), r: V.r.slice(-keep), pos: x.mem ? [] : V.pos.map(o => ({ t: o.t, ev: o.ev, side: o.side, px: o.px, c: o.c, ...(o.f !== undefined ? { f: o.f } : {}), ...(o.rk !== undefined ? { rk: o.rk } : {}) })) }]; })), f: L.f, ...(L.ch ? { ch: L.ch } : {}), live: L.live, dA: L.dA || {}, hA: L.hA || {} }; };
+const lateBlob = (keep = 30) => { const L = lateState(); return { v: Object.fromEntries(LATE_VARIANTS.map(x => { const V = L.v[x.k]; return [x.k, { n: V.n, w: V.w, sum: V.sum, nw: V.nw, cs: V.cs.slice(-4), b: V.b, ...(V.verdict ? { verdict: V.verdict } : {}), ...(V.miss ? { miss: V.miss } : {}), ...(V.xn ? { xn: V.xn, xs: V.xs } : {}), r: x.mem ? [] : V.r.slice(-keep), pos: x.mem ? [] : V.pos.map(o => ({ t: o.t, ev: o.ev, side: o.side, px: o.px, c: o.c, ...(o.f !== undefined ? { f: o.f } : {}), ...(o.rk !== undefined ? { rk: o.rk } : {}) })) }]; })), f: L.f, ...(L.ch ? { ch: L.ch } : {}), ...(L.bn ? { bn: L.bn } : {}), ...(L.arb ? { arb: { day: L.arb.day, n: L.arb.n, best: L.arb.best } } : {}), live: L.live, dA: L.dA || {}, hA: L.hA || {} }; };
 const lateRec = k => { const V = lateState().v[k], n = V.n, sum = V.sum, w = V.w; return { n, sum, w, avg: n ? sum / n : 0 }; };
 const LATE_WINDOWS = 50, LATE_PASS = 0.02; // verdict after 50 graded windows: passes at +2¢/contract or better
 const lateLine = x => { const { n, sum, w, avg } = lateRec(x.k), nw = lateState().v[x.k].nw; return `⏰ ${x.name} test: ${n} trades · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract) · ${Math.min(nw, LATE_WINDOWS)}/${LATE_WINDOWS} windows`; };
 const liveLine = () => { const LV = lateState().live, on = [lateName(lateChamp()), ...LATE_VARIANTS.filter(x => x.slow && lateState().v[x.k].verdict === 'pass').map(x => x.name)].join(' + '); return `💵 REAL ${on} (all coins): ${CFG.LATE_LIVE === 1 ? 'ON' : LV.stopped ? 'STOPPED' : 'OFF'} · ${LV.n} trades · ${LV.w}W·${LV.n - LV.w}L · ${LV.sum >= 0 ? '+' : '−'}${money(Math.abs(LV.sum))} · ${CFG.LATE_STOP >= 10000 ? 'no loss limit' : `stops at −${money(CFG.LATE_STOP)}`} · ${LV.pos.length} open`; };
 // self-learning switch (Brad 11/25): real 15-min money follows whichever rule has proven itself best lately; with none proven it stays on the plain 12th-minute rule (Brad: keep money on)
-const LATE_FAST = () => [{ k: 'm12', name: '12th-minute' }, { k: 'm125', name: '12½-minute' }, ...LATE_FILTERS.map(F => ({ k: F.k, name: F.name, F }))];
+const LATE_FAST = () => [{ k: 'm12', name: '12th-minute' }, { k: 'm125', name: '12½-minute' }, ...LATE_FILTERS.map(F => ({ k: F.k, name: F.name, F }))]; // 'bid 2¢ under' and 'sell early' are left out until real resting bids / real selling are built and Brad OKs them
 const lateRecOf = k => { const L = lateState(); return L.v[k] || L.f[k]; };
 const lateWins = k => { const L = lateState(); return L.f[k] ? Math.max(0, L.v.m12.nw - (L.f[k].s0 || 0)) : (L.v[k] ? L.v[k].nw : 0); }; // 15-min windows each rule has been judged on
 const lateOk = k => { const r = lateRecent(lateRecOf(k)); return lateWins(k) >= LATE_WINDOWS && r.n >= 20 && r.avg >= LATE_PASS; };
 const lateChamp = () => { const ch = lateState().ch; return LATE_FAST().some(x => x.k === ch) ? ch : 'm12'; };
-const lateName = k => (LATE_FAST().find(x => x.k === k) || { name: k }).name;
+const lateName = k => (LATE_FAST().find(x => x.k === k) || LATE_VARIANTS.find(x => x.k === k) || { name: k }).name;
 const fLine = F => { const R = lateState().f[F.k], avg = R.n ? R.sum / R.n : 0, rc = lateRecent(R); return `🔎 ${F.name}: ${R.n} trades · ${R.w}W·${R.n - R.w}L · ${R.sum >= 0 ? '+' : '−'}${money(Math.abs(R.sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract) · ${Math.min(lateWins(F.k), LATE_WINDOWS)}/${LATE_WINDOWS} windows${rc.n ? ` · recent ${(rc.avg * 100).toFixed(1)}¢` : ''}`; };
 const champLine = () => `🧠 Real 15-min money follows: ${lateName(lateChamp())} (switches by itself to any rule that beats it after ${LATE_WINDOWS} windows at +${Math.round(LATE_PASS * 100)}¢ or better)`;
-const lateLines = () => LATE_VARIANTS.map(x => `${lateLine(x)} · ${lateState().v[x.k].pos.length} open`).join('\n') + '\n' + LATE_FILTERS.map(fLine).join('\n') + (CFG.LATE_LIVE === 1 || lateState().live.n || lateState().live.stopped ? '\n' + liveLine() + '\n' + champLine() : '');
+const arbLine = () => { const A = lateState().arb; return `🆓 Free-money scanner today: ${A && A.day === String(startOfTodayCT()) && A.n ? `${A.n} gap${A.n > 1 ? 's' : ''} seen (best +${(A.best * 100).toFixed(1)}¢ guaranteed)` : 'no gaps seen yet'} — watching only, no money`; };
+const benchLine = () => { const b = benchedNow(); return `🪑 Benched now: ${b.length ? b.join(', ') : 'nothing (every coin and time of day is above −2¢/contract)'}`; };
+const lateLines = () => LATE_VARIANTS.map(x => `${lateLine(x)} · ${lateState().v[x.k].pos.length} open${x.bid ? ` · ${lateState().v[x.k].miss || 0} bids never filled` : ''}${x.exit ? ` · ${(lateState().v[x.k].xn || 0) + lateState().v[x.k].pos.filter(o => o.xp !== undefined).length} sold early (graded ones ${(lateState().v[x.k].xs || 0) >= 0 ? 'saved' : 'cost'} ${money(Math.abs(lateState().v[x.k].xs || 0))} vs holding)` : ''}`).join('\n') + '\n' + LATE_FILTERS.map(fLine).join('\n') + '\n' + benchLine() + '\n' + arbLine() + (CFG.LATE_LIVE === 1 || lateState().live.n || lateState().live.stopped ? '\n' + liveLine() + '\n' + champLine() : '');
 // real money: the 12th-minute strategy on every coin, at the same moment and price the paper test buys (Brad funded $15 on 11/24 after the paper test passed: "go full blown")
 // size grows with the account (1 contract per coin per LATE_PER $); never more than MAX_OPEN_PCT of the money in open positions; reserve kept
-async function lateLive(m, side, px, name = '12th-minute') {
+// sizing (Brad 11/25 evening): only once the rule real money follows has PROVEN itself (50+ windows at +2¢): 1 contract per $10 instead of $15, and 2× when the model and a calm market agree, 3× when there's no fresh news either
+function lateSize(f) { if (!lateOk(lateChamp())) return { mult: 1, per: CFG.LATE_PER }; const fl = f || 0; return { mult: (fl & 3) === 3 ? ((fl & 4) ? 3 : 2) : 1, per: Math.min(CFG.LATE_PER, 10) }; }
+async function lateLive(m, side, px, name = '12th-minute', { mult = 1, per = CFG.LATE_PER } = {}) {
   const LV = lateState().live;
   if (CFG.LATE_LIVE !== 1 || LV.stopped || LV.pos.some(o => o.ev === m.event_ticker)) return;
   const a = await account(true), open = LV.pos.reduce((x, o) => x + o.cost, 0), money0 = a.cash + open;
-  let count = Math.max(1, Math.floor(money0 / CFG.LATE_PER));
+  let count = Math.max(1, Math.floor(money0 / per)) * mult; // the room check below still caps it at 60% of the money in open bets
   const lim = Math.max(px, Math.min(CFG.LATE_MAX, Math.round((px + CFG.LATE_GRACE) * 100) / 100)); // live: a cent of room so a 1¢ tick doesn't miss the fill (live 11/24: 3 of 5 missed)
   const room = Math.min(CFG.MAX_OPEN_PCT * money0 - open, a.cash - Math.max(resv(a), 0.02));
   while (count > 0 && count * lim + feeTotal(count, lim) > room) count--;
@@ -879,7 +895,8 @@ function lateFlags(m, side, px, cond) {
   const wild = x => !x || !(x.sig5h > 0) || x.sig15 > 1.5 * x.sig5h || Math.abs(x.z5) > 2; // choppy, or a 2-sigma 5-minute swing
   if (st && !wild(st) && !wild(btc)) f |= 2;
   if (!lateNewsBusy()) f |= 4;
-  return f;
+  const B = bnState(); if (!bnBad(B.c[bnCoin(m.ticker)]) && !bnBad(B.t[bnBlock(Date.now()).k])) f |= 8; // coin and time of day not benched
+  return f | 128;
 }
 async function lateEntry(m, mins, k, cond) {
   const L = lateState(), xs = k ? [LATE_VARIANTS.find(v => v.k === k)] : LATE_VARIANTS.filter(v => !v.slow && mins >= v.lo && mins <= v.hi); // 12th and 12½-minute windows overlap: one quote serves both
@@ -896,15 +913,33 @@ async function lateEntry(m, mins, k, cond) {
     if (!side) { log('LATE skip', x.k, m.ticker, 'no clear leader', mid.toFixed(3)); continue; }
     if (px > CFG.LATE_MAX) { log('LATE skip', x.k, m.ticker, side, 'price', px, '> max', CFG.LATE_MAX); continue; }
     const V = L.v[x.k], o = { t: m.ticker, ev: m.event_ticker, side, px, c: Date.parse(m.close_time), at: Date.now() };
-    if (x.k === 'm12') o.f = lateFlags(m, side, px, cond);
+    if (!x.slow) o.f = lateFlags(m, side, px, cond);
+    if (x.k === 'm12') { const bid = Math.round((px - 0.02) * 1000) / 1000; (L.bids = L.bids || {})[m.event_ticker] = { t: m.ticker, ev: m.event_ticker, side, bid, c: o.c }; // the "bid 2¢ under" test waits for a seller at this price
+      const X = L.v.m12x; if (!X.pos.some(y => y.ev === m.event_ticker)) X.pos = X.pos.concat([{ t: m.ticker, ev: m.event_ticker, side, px, c: o.c, at: Date.now() }]).slice(-80); } // the "sell early" twin
     V.pos = V.pos.concat([o]).slice(-80);
     log('LATE', x.k, m.ticker, side, px, `${mins.toFixed(1)} min left`, o.f !== undefined ? `filters ${o.f & 1 ? 'M' : '-'}${o.f & 2 ? 'C' : '-'}${o.f & 4 ? 'N' : '-'}` : '');
     const fail = e => { log('LATE LIVE failed', m.ticker, e.message); return say(`⚠️ Real ${x.name} buy failed: ${String(e.message).replace(/^.*?-> /, '').slice(0, 200)} — no money spent on this one.`); };
     if (x.slow) { if (V.verdict === 'pass') await lateLive(m, side, px, x.name).catch(fail); } // hourly/daily: real money once their own test passed
-    else if (x.k === champ) await lateLive(m, side, px, x.name).catch(fail); // the 15-min rule real money follows right now
-    else if (x.k === 'm12' && CF && (o.f & CF.need) === CF.need) { if (CF.cap) (S.liveCand = S.liveCand || []).push({ m, side, px, name: CF.name }); else await lateLive(m, side, px, CF.name).catch(fail); } // a filter rule leads: buy only what it would
+    else if (x.k === champ) await lateLive(m, side, px, x.name, lateSize(o.f)).catch(fail); // the 15-min rule real money follows right now
+    else if (x.k === 'm12' && CF && (o.f & CF.need) === CF.need) { if (CF.cap) (S.liveCand = S.liveCand || []).push({ m, side, px, name: CF.name, f: o.f }); else await lateLive(m, side, px, CF.name, lateSize(o.f)).catch(fail); } // a filter rule leads: buy only what it would
   }
   await saveSettings().catch(() => {});
+}
+// "bid 2¢ under" paper test: filled only if the ask on our side comes down to our bid before 1 min left (a seller would have hit it); otherwise it's a miss
+function lateBidCheck(m, mins) {
+  const L = lateState(), B = (L.bids || {})[m.event_ticker]; if (!B || B.t !== m.ticker) return;
+  const V = L.v.m12b;
+  if (mins < 1.0) { delete L.bids[m.event_ticker]; V.miss = (V.miss || 0) + 1; log('LATE BID missed', m.ticker, B.side, B.bid); return; }
+  const ask = d(m, B.side + '_ask');
+  if (ask > 0 && ask <= B.bid + 1e-9) { delete L.bids[m.event_ticker]; V.pos = V.pos.concat([{ t: B.t, ev: B.ev, side: B.side, px: B.bid, c: B.c, at: Date.now() }]).slice(-80); log('LATE BID filled', m.ticker, B.side, B.bid, `${mins.toFixed(1)} min left`); }
+}
+// "sell early if it flips" paper test: once our side's bid is 45¢ or less with 15+ seconds left, it sells there (both fees counted) instead of riding it to $0
+function lateExitCheck(m, mins) {
+  for (const o of lateState().v.m12x.pos) {
+    if (o.t !== m.ticker || o.xp !== undefined || mins < 0.25) continue;
+    const ya = d(m, 'yes_ask'), sp = o.side === 'yes' ? d(m, 'yes_bid') : (d(m, 'no_bid') > 0 ? d(m, 'no_bid') : (ya > 0 ? 1 - ya : NaN));
+    if (sp > 0 && sp <= 0.45) { o.xs = sp; o.xp = Math.round((sp - o.px - 0.07 * o.px * (1 - o.px) - 0.07 * sp * (1 - sp)) * 100) / 100; log('LATE EXIT', m.ticker, o.side, 'bought', o.px, 'sold', sp, `${mins.toFixed(1)} min left`, o.xp); }
+  }
 }
 // "max 2 per side" leading: the scan's candidates are ranked after it (all coins share the window), and only the 2 priced highest per side are bought
 async function flushLiveCand() {
@@ -913,13 +948,32 @@ async function flushLiveCand() {
   for (const x of c) { const g = Date.parse(x.m.close_time) + '|' + x.side; (by[g] = by[g] || []).push(x); }
   for (const [g, xs] of Object.entries(by)) {
     const [cl, sd] = g.split('|'), have = LV.pos.filter(o => o.c === +cl && o.side === sd).length;
-    for (const x of xs.sort((p, q) => q.px - p.px).slice(0, Math.max(0, 2 - have))) await lateLive(x.m, x.side, x.px, x.name).catch(e => { log('LATE LIVE failed', x.m.ticker, e.message); return say(`⚠️ Real ${x.name} buy failed: ${String(e.message).replace(/^.*?-> /, '').slice(0, 200)} — no money spent on this one.`); });
+    for (const x of xs.sort((p, q) => q.px - p.px).slice(0, Math.max(0, 2 - have))) await lateLive(x.m, x.side, x.px, x.name, lateSize(x.f)).catch(e => { log('LATE LIVE failed', x.m.ticker, e.message); return say(`⚠️ Real ${x.name} buy failed: ${String(e.message).replace(/^.*?-> /, '').slice(0, 200)} — no money spent on this one.`); });
   }
 }
 // hourly/daily ladders: pin the strike nearest the price as the hour (or day) opens, then at 12 min left buy whichever side of it is winning
+// free-money scanner (Brad 11/25 evening; watching only): on one hourly/daily ladder every strike settles on the same price, so YES on a lower strike + NO on the next strike up pays at least $1.
+// If that pair costs under $1 after fees, the profit is guaranteed. Logged and counted, nothing bought.
+function lateArb(byEv, now) {
+  const L = lateState(), today = String(startOfTodayCT()); if (!L.arb || L.arb.day !== today) L.arb = { day: today, n: 0, best: 0 }; S.arbSeen = S.arbSeen || {};
+  for (const [ev, ms] of Object.entries(byEv)) {
+    const lad = ms.filter(m => String(m.strike_type).startsWith('greater') && Number.isFinite(num(m.floor_strike))).sort((a, b) => num(a.floor_strike) - num(b.floor_strike));
+    if (lad.length < 2 || (Date.parse(lad[0].close_time) - now) / 60000 < 1) continue;
+    for (let i = 0; i + 1 < lad.length; i++) {
+      const lo = lad[i], hi = lad[i + 1], ya = d(lo, 'yes_ask'), na = d(hi, 'no_ask'); if (!(ya > 0 && na > 0)) continue;
+      const gain = Math.round((1 - ya - na - feeTotal(1, ya) - feeTotal(1, na)) * 1000) / 1000;
+      if (gain <= 0.005) continue;
+      const key = `${lo.ticker}|${hi.ticker}`; if (S.arbSeen[key] && now - S.arbSeen[key] < 3600e3) continue; S.arbSeen[key] = now;
+      L.arb.n += 1; L.arb.best = Math.max(L.arb.best, gain); saveSettings().catch(() => {});
+      log('ARB', ev, `YES ${lo.ticker} @ ${ya} + NO ${hi.ticker} @ ${na}`, `guaranteed +${(gain * 100).toFixed(1)}¢ (+$${(1 + gain).toFixed(2)} if it lands between)`);
+    }
+  }
+  for (const [k, t] of Object.entries(S.arbSeen)) if (now - t > 6 * 3600e3) delete S.arbSeen[k];
+}
 async function lateLadder(markets, now) {
   const L = lateState(), HA = (L.hA = L.hA || {}), DA = (L.dA = L.dA || {}), byEv = {}; // anchors are saved (a restart mustn't lose the hour's/day's strike)
   for (const m of markets) (byEv[m.event_ticker] = byEv[m.event_ticker] || []).push(m);
+  try { lateArb(byEv, now); } catch (e) { log('arb scan failed', e.message); }
   for (const [ev, ms] of Object.entries(byEv)) {
     const close = Date.parse(ms[0].close_time), mins = (close - now) / 60000, daily = isDailyClose(ms[0].close_time), len = daily ? 1440 : 60, A = daily ? DA : HA;
     if (!A[ev] && mins <= len && mins >= (daily ? 720 : len - 5)) { // hourly: as the hour opens; daily: as soon as it's listed in the first half of its day // window just opened: the at-the-money strike
@@ -939,7 +993,7 @@ function lateReChamp() { // pick the 15-min rule real money follows; returns the
   if (next === cur) return null;
   L.ch = next; log('LATE CHAMP', cur, '->', next);
   return next === 'm12' && !best ? `🧠 SELF-LEARNING: "${lateName(cur)}" stopped proving itself (recent ${pct(cur)}/contract) — real 15-min money is back on the plain 12th-minute rule.`
-    : `🧠 SELF-LEARNING SWITCH: real 15-min money now follows "${lateName(next)}" — recent ${pct(next)}/contract over its last ${lateRecent(lateRecOf(next)).n} trades, ${lateWins(next)} windows (was "${lateName(cur)}" at ${pct(cur)}).`;
+    : `🧠 SELF-LEARNING SWITCH: real 15-min money now follows "${lateName(next)}" — recent ${pct(next)}/contract over its last ${lateRecent(lateRecOf(next)).n} trades, ${lateWins(next)} windows (was "${lateName(cur)}" at ${pct(cur)}).\n📈 It's proven, so bets grow: 1 contract per $10 (was $${CFG.LATE_PER}), 2× when the model and a calm market agree, 3× with no fresh news too.`;
 }
 async function lateGrade() {
   const L = lateState(), parts = [], verdicts = []; let graded = false;
@@ -953,8 +1007,10 @@ async function lateGrade() {
       let m; try { m = (await kalshi('GET', `/markets/${o.t}`)).market || {}; } catch (e) { continue; }
       const res = String(m.result || '').toLowerCase();
       if (res !== 'yes' && res !== 'no') { if (Date.now() > o.c + 6 * 3600e3) V.pos = V.pos.filter(y => y !== o); continue; }
-      const win = res === o.side ? 1 : 0, pnl = Math.round((win - o.px - 0.07 * o.px * (1 - o.px)) * 100) / 100; // taker fee included
+      let win = res === o.side ? 1 : 0, pnl = Math.round((win - o.px - 0.07 * o.px * (1 - o.px)) * 100) / 100; // taker fee included
+      if (x.exit && o.xp !== undefined) { V.xn = (V.xn || 0) + 1; V.xs = Math.round(((V.xs || 0) + o.xp - pnl) * 100) / 100; pnl = o.xp; win = pnl > 0 ? 1 : 0; } // sold early: its sale is the result (and how it compared with holding)
       graded = true; V.r = V.r.concat([pnl]).slice(-100); V.n += 1; V.w += win; V.sum = Math.round((V.sum + pnl) * 100) / 100; V.pos = V.pos.filter(y => y !== o); lateB(V, pnl);
+      if (x.k === 'm12') { const B = bnState(), cn = bnCoin(o.t), bk = bnBlock(o.c - 3 * 60e3).k; bnAdd(B.c[cn] = B.c[cn] || [0, 0, 0, 0], pnl); bnAdd(B.t[bk] = B.t[bk] || [0, 0, 0, 0], pnl); } // score the coin and the time of day
       if (x.k === 'm12' && o.f !== undefined) for (const F of LATE_FILTERS) if ((o.f & F.need) === F.need && (!F.cap || (o.rk & F.cap))) { const R = L.f[F.k]; R.n += 1; R.w += win; R.sum = Math.round((R.sum + pnl) * 100) / 100; lateB(R, pnl); } // each filter's record: the m12 trades it would have taken
       { const wk = Math.round(o.c / 60e3); if (!V.cs.includes(wk)) { V.cs = V.cs.concat([wk]).slice(-10); V.nw += 1; } } // one count per 15-min window (all coins share its close minute)
       if (x.slow || (x.k === 'm12' && CFG.LATE_LIVE !== 1)) lines.push(`${win ? '✅' : '❌'} ${label(o.t).replace(/ ≥ \$[\d,.]+/, '')} ${o.side.toUpperCase()} @ ${cents(o.px)} ${pnl >= 0 ? '+' : '−'}${money(Math.abs(pnl))}`); // with real money on, the 12th-minute paper twin would repeat the real results message; 15-min test variants: totals only (every 15 min would be spam)
@@ -1070,6 +1126,7 @@ async function scan(fast) {
     for (let m of markets) {
       const mins = (new Date(m.close_time).getTime() - now) / 60000;
       if (isFast(series) && CFG.LATE === 1 && mins <= 3.0 && mins >= 2.0) await lateEntry(m, mins, undefined, cond).catch(e => log('late entry failed', m.ticker, e.message));
+      if (isFast(series) && CFG.LATE === 1) { lateBidCheck(m, mins); lateExitCheck(m, mins); }
       if (!isFast(series) && CFG.LATE === 1 && m === markets[0]) await lateLadder(markets, now).catch(e => log('late ladder failed', series, e.message));
       if (!inWindow(m, mins)) continue;
       const W0 = S.win[m.event_ticker] || (S.win[m.event_ticker] = { label: label(m.ticker).replace(/ ≥ \$[\d,.]+/, ''), series, close: Date.parse(m.close_time), best: null });
@@ -1454,6 +1511,7 @@ async function onUpdate(u) {
   if (env.BOT_TEST === '1' && t === '/_livereset') { lateState().live = {}; lateState(); return; } // tests: fresh real record
   if (env.BOT_TEST === '1' && t === '/_acct2') { acctCache = null; await Promise.all([account(true), account(true)]); return; } // tests: two scans read the account at the same moment
   if (env.BOT_TEST === '1' && t === '/_lateage') { const L = lateState(), all = [...Object.values(L.v).flatMap(V => V.pos), ...L.live.pos]; if (all.length) { const dt = Date.now() - 4 * 60e3 - Math.max(...all.map(o => o.c)); for (const o of all) o.c += dt; } return; } // tests: every open window closed 4 min ago (windows keep their own close times)
+  if (env.BOT_TEST === '1' && /^\/_bench \w+$/.test(t)) { bnState().c[t.split(' ')[1].toUpperCase()] = [25, -2, 10, -1]; return; } // tests: a coin with 35 recent trades at −8.6¢/contract
   if (env.BOT_TEST === '1' && t === '/_newsfresh') { S.newsLog.unshift({ title: 'Test: market-moving macro story', level: 'macro', got: Date.now(), at: Date.now() }); return; } // tests: a fresh headline the news filter must see
   if (env.BOT_TEST === '1' && t === '/_newsold') { for (const x of S.newsLog) x.got = 0; return; } // tests: those headlines are old now
   if (env.BOT_TEST === '1' && /^\/_lateelig \w+$/.test(t)) { const L = lateState(), k = t.split(' ')[1], R = L.f[k] || L.v[k]; Object.assign(R, { n: 60, w: 55, sum: 3, b: [25, 1.5, 10, 0.6] }); if (L.f[k]) R.s0 = L.v.m12.nw - 60; else R.nw = 60; return; } // tests: a rule with 60 windows at +6¢ recently

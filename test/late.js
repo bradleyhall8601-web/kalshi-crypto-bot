@@ -248,6 +248,53 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(msgs().some(m => /stopped proving itself.*back on the plain 12th-minute rule/.test(m)) && (pinned().PAPERS.late.ch || 'm12') === 'm12', 'back to the 12th-minute rule when the leader fades (money stays on)');
   await send('/set latelive 0'); await wait(200);
 
+  console.log('\n14. Benching, cheaper bids, sell-early, free-money scanner, bigger bets once proven (Brad 11/25 evening)');
+  for (const k of Object.keys(W.markets)) if (W.markets[k].status === 'open') delete W.markets[k];
+  await send('/_livereset'); await send('/set latelive 0'); await wait(300); W.shards[0] = 15.66; W.shards[2] = 0;
+  await send('/_bench BTC'); await wait(100);
+  const bA = market('KXBTC15M', 2.9, 0.80), bB = market('KXETH15M', 2.9, 0.80), bC = market('KXSOL15M', 2.9, 0.80);
+  for (const m of [bB, bC]) m.close_time = bA.close_time;
+  await send('/_fasttick'); await wait(4000);
+  const pA = L('m12').pos.find(o => o.t === bA.ticker), pB = L('m12').pos.find(o => o.t === bB.ticker);
+  ok(pA && (pA.f & 128) && !(pA.f & 8) && pB && (pB.f & 8), 'a losing coin (BTC) is benched on its new trades; ETH is not', JSON.stringify({ pA, pB }));
+  await send('/paper'); await wait(400);
+  ok(/🪑 Benched now: BTC/.test(last()) && /🆓 Free-money scanner today/.test(last()) && /bid 2¢ under test/.test(last()) && /sell early if it flips test/.test(last()), '/paper shows benched coins, the scanner and both new tests', last());
+  // cheaper bid: ETH's ask comes down to our bid → filled at the bid; BTC's never does → miss at 1 min left
+  bB.yes_ask_dollars = '0.7900'; bB.yes_bid_dollars = '0.7700';
+  bC.close_time = new Date(Date.now() + 1.5 * 60e3).toISOString(); bC.yes_bid_dollars = '0.4000'; bC.yes_ask_dollars = '0.4200'; // SOL flips: YES bid 40¢ with 1.5 min left
+  bA.close_time = bB.close_time = bC.close_time;
+  await send('/_fasttick'); await wait(4000);
+  for (const m of [bA, bB, bC]) m.close_time = new Date(Date.now() + 0.9 * 60e3).toISOString();
+  await send('/_fasttick'); await wait(4000);
+  await send('/paper'); await wait(400);
+  ok(/bid 2¢ under test: 0 trades[^\n]*· 2 open · 1 bids never filled/.test(last()), 'bid 2¢ under: ETH filled when its ask came down, SOL filled as it crashed (the catch), BTC missed', last());
+  ok(/sell early if it flips test: [^\n]*· 1 sold early/.test(last()), 'sell early: SOL sold when its side fell to 40¢', last());
+  const bn0 = pinned().PAPERS.late.f.bench.n; await send('/_lateelig news'); await wait(100);
+  settle(bA, 'yes'); settle(bB, 'yes'); settle(bC, 'no');
+  await send('/_lateage'); await send('/scan'); await wait(6000);
+  await until(() => ((pinned().PAPERS.late.v.m12x || {}).xn || 0) >= 1);
+  const P14 = pinned().PAPERS.late;
+  ok(P14.v.m12b.n === 2 && P14.v.m12b.w === 1 && Math.abs(P14.v.m12b.sum + 0.6) < 1e-9 && P14.v.m12b.miss === 1 && P14.v.m12b.r.length === 0, 'bid test graded at the bid price: ETH +$0.20 at 79¢ (vs +$0.18 at 81¢), SOL −$0.80', JSON.stringify(P14.v.m12b));
+  ok(P14.v.m12x.xn === 1 && Math.abs(P14.v.m12x.xs - 0.38) < 0.011, 'sell early: sold SOL at 40¢ (−$0.44) instead of losing $0.82 → saved $0.38', JSON.stringify(P14.v.m12x));
+  ok(P14.f.bench.n - bn0 === 2, 'skip-losing-coins record took ETH and SOL, not benched BTC', JSON.stringify({ before: bn0, after: P14.f.bench }));
+  ok(P14.bn && P14.bn.c.ETH && P14.bn.c.ETH[2] + P14.bn.c.ETH[0] >= 1 && Object.keys(P14.bn.t).length >= 1, 'coin and time-of-day records are kept and saved', JSON.stringify(P14.bn));
+  ok(P14.ch === 'news' && msgs().some(m => /now follows "12th-min · no fresh news"[\s\S]*1 contract per \$10/.test(m)), 'a proven rule takes over and its bets grow (switch message says so)', msgs().filter(m => /SWITCH/.test(m)).slice(-1)[0]);
+  // bigger bets once proven: 1 per $10, ×2/×3 on the surest signals
+  await send('/set latelive 1'); await wait(300); const r14 = W.orders.length;
+  const sz = market('KXETH15M', 2.9, 0.15); // NO leads at 86¢; the model is sure (ETH ~$1,680 vs a $60,000 strike)
+  await send('/_fasttick'); await wait(4000);
+  const zo = W.orders.slice(r14).find(o => o.ticker === sz.ticker), zf = (L('m12').pos.find(o => o.t === sz.ticker) || {}).f || 0, want = (zf & 3) === 3 ? ((zf & 4) ? 3 : 2) : 1;
+  ok(zo && Number(zo.count) === want && want >= 1, `proven rule sizing: ${want} contract(s) (flags ${zf & 7}, $15.66 / $10 = 1 base)`, JSON.stringify(zo));
+  // the free-money scanner: an upside-down ladder (the higher strike priced MORE likely) is a guaranteed gap
+  const a0 = (pinned().PAPERS.late.arb || {}).n || 0;
+  ladder('KXBTCD-26NOV2520', 40, [0.59, 0.70]);
+  await send('/scan'); await wait(4000);
+  await until(() => ((pinned().PAPERS.late.arb || {}).n || 0) > a0);
+  const A14 = pinned().PAPERS.late.arb || {};
+  ok(A14.n === a0 + 1 && Math.abs(A14.best - 0.05) < 0.006, 'scanner found the gap: YES 60¢ + NO 31¢ + 4¢ fees = 95¢ for a $1 minimum payout', JSON.stringify(A14));
+  ok(W.orders.length === r14 + (zo ? (W.orders.slice(r14).length) : 0) && !W.orders.slice(r14).some(o => /KXBTCD-26NOV2520/.test(o.ticker)), 'the scanner only watches (no orders)');
+  await send('/set latelive 0'); await wait(200);
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('TEST CRASH', e); process.exit(1); });
