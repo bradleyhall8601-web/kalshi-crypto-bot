@@ -190,6 +190,8 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(W.pinned.length <= 4096 && P12.PAPERS.late.live.n === 145 && P12.PAPERS.late.live.stopped, `saved (${W.pinned.length} chars) with the real record and stop flag intact`, String(W.pinned.length));
   ok(Object.keys(P12.PAPERS.late.dA || {}).length === 7 && Object.keys(P12.PAPERS.late.hA || {}).length === 14, 'all daily and hourly anchors kept');
   ok(P12.LATE_LIVE !== undefined && P12.LATE_STOP !== undefined, 'settings themselves never trimmed');
+  const nps12 = P12.NPS || [], fca = nps12.find(x => /^UK FCA/.test(x.title));
+  ok(fca && require('../news').sameStory('Binance hack: refunds still stuck a month on - Decrypt', nps12) && (/Binance Hack/.test(fca.title) || (fca.c === 1 && (fca.v || []).includes('binance'))), 'a shortened saved news title keeps its hack/venue tags, so follow-ups still match after a restart (live 11/26 3:00 PM CT)', JSON.stringify(nps12));
 
   console.log('\n13. 12½-minute test, the four filters, the self-learning switch, partial fills (Brad 11/25: "yes all of that")');
   for (const k of Object.keys(W.markets)) if (W.markets[k].status === 'open') delete W.markets[k];

@@ -56,6 +56,13 @@ ok(news.sameStory('Chainflip Hack Losses Rise to $12M After 122.9 BTC Theft - Co
 ok(news.sameStory('Chainflip Offers 10% Bounty After 122.86 BTC Vault Hack - Altcoin Buzz', first), 'Chainflip bounty story recognized as the same story');
 ok(news.sameStory('Federal Reserve: Consecutive hikes and sticky inflation – TD Securities - www.tmgm.com', ['Federal Reserve: Consecutive hikes and sticky inflation – TD Securities - FXStreet']), 'same headline from another outlet recognized');
 ok(!news.sameStory('Major exchange Bybit hacked, $1.4B drained', first), 'a different hack is a new story');
+{ // live 11/26: the pinned save had cut 'Binance Secures $6.5B Global Asset Freeze as U.S. Targets Stolen Crypto' to 60 chars ("…Targets St"), so after a restart the FCA follow-up paused the 3:00 PM CT window
+  const fca = 'UK FCA Pushes Ahead With Tighter DeFi Rules, Citing $6.3B Binance Hack - Crypto Economy', full = 'Binance Secures $6.5B Global Asset Freeze as U.S. Targets Stolen Crypto - NFTevening', at = Date.parse('2026-11-26T17:00:03Z'), now = Date.parse('2026-11-26T20:56:54Z');
+  const cut = s => ({ title: s.slice(0, 60), at, ...news.storyTags(s) });
+  ok(!news.sameStory(fca, [{ title: full.slice(0, 60), at }], now) && news.sameStory(fca, [cut(full)], now), 'a 60-char saved title keeps its hack tag (c), so the venue follow-up still matches');
+  const t = news.storyTags(fca); ok(t.c === 1 && (t.v || []).join() === 'binance' && news.sameStory('Binance hack refunds delayed again - Decrypt', [cut(fca)], now), 'a venue past the cut is kept too (v)');
+  ok(JSON.stringify(news.storyTags('Binance halts withdrawals')) === '{}' && JSON.stringify(news.storyTags('Gloom overshadows the year-end market! JPMorgan: Escalating military tensions')) === '{}', 'short or non-hack titles get no tags');
+}
 ok(!news.sameStory('Coinbase halts trading after outage', ['Binance suspends withdrawals after exploit']), 'different exchanges are different stories');
 const binance = ['9,293 Ether moves between wallets tied to the 2026 Binance hack - Crypto Briefing'];
 ok(news.sameStory('DoJ seeks to recover over $1B in crypto stolen in Binance hack - Breakingthenews', binance), 'Binance hack follow-up (DoJ) is the same story');

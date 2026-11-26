@@ -104,10 +104,19 @@ function sameStory(title, recent, now = Date.now()) {
   const a = words(title), v = CRITICAL.test(headline(title)) ? venuesOf(title) : new Set();
   return (recent || []).some(x => {
     const r = typeof x === 'string' ? x : x.title, age = typeof x === 'string' ? 0 : now - x.at;
-    if (v.size && age < VENUE_MS && CRITICAL.test(headline(r)) && [...venuesOf(r)].some(y => v.has(y))) return true; // follow-ups on the same venue's hack/halt ("DoJ seeks to recover…", "…moves tied to the Binance hack")
+    const rc = CRITICAL.test(headline(r)) || !!(x && x.c), rv = new Set([...venuesOf(r), ...((x && x.v) || [])]); // c/v: what a shortened saved title lost (storyTags)
+    if (v.size && age < VENUE_MS && rc && [...rv].some(y => v.has(y))) return true; // follow-ups on the same venue's hack/halt ("DoJ seeks to recover…", "…moves tied to the Binance hack")
     if (age >= STORY_MS) return false;
     let n = 0; for (const w of words(r)) if (a.has(w)) n++; return n >= 2;
   });
 }
+// when the pinned save is short of room it cuts stored titles to 60 chars: keep what the venue follow-up match needs (live 11/26: the saved "…as U.S. Targets St"
+// had lost "Stolen", so after the 2:30 PM CT restart "UK FCA Pushes Ahead With Tighter DeFi Rules, Citing $6.3B Binance Hack" paused the 3:00 PM CT window)
+function storyTags(title, max = 60) {
+  const cut = String(title).slice(0, max), o = {};
+  if (CRITICAL.test(headline(title)) && !CRITICAL.test(headline(cut))) o.c = 1;
+  const v = [...venuesOf(title)].filter(x => !venuesOf(cut).has(x)); if (v.length) o.v = v;
+  return o;
+}
 const usDataDay = (ms = Date.now()) => dataDay(etParts(ms)); // a US weekday that isn't a federal holiday
-module.exports = { poll, parse, classify, calendarPause, releaseWindow, decisionWindow, usDataDay, sameStory, VENUE_MS, FEEDS };
+module.exports = { poll, parse, classify, calendarPause, releaseWindow, decisionWindow, usDataDay, sameStory, storyTags, VENUE_MS, FEEDS };
