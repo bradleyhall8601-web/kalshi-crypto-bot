@@ -424,6 +424,14 @@ W.shards = { 0: 0.66, 2: 0 };
   await send('/_fasttick'); await wait(4000);
   ok(W.orders.slice(r16d).some(o => o.ticker === noon.ticker), '11 AM CT on a weekday: real buy as usual');
   delete W.markets[noon.ticker];
+  // live 11/26: DOGE quoted 64¢ but filled at 56¢, NEAR 69¢ → 53¢ (the leader collapsed during the ~2 s account check; a buy limit has no floor). Re-check the book right before the order.
+  await send('/_ctclock 13 1'); await wait(100);
+  const r16e = W.orders.length, fall = market('KXETH15M', 2.9, 0.80), hold = market('KXXRP15M', 2.9, 0.80); hold.close_time = fall.close_time;
+  W.onBalance = Object.assign(() => { W.live = W.live || {}; W.live[fall.ticker] = { ...fall, yes_bid_dollars: '0.5200', yes_ask_dollars: '0.5400' }; }, { after: fall.ticker });
+  await send('/_fasttick'); await wait(4500);
+  const o16e = W.orders.slice(r16e), pf = L('m12').pos.find(o => o.t === fall.ticker);
+  ok(pf && pf.px >= 0.75 && !o16e.some(o => o.ticker === fall.ticker) && o16e.some(o => o.ticker === hold.ticker), 'leader quoted 81¢ fell to 54¢ before the order: no real buy (paper took it at the quote); a steady leader still bought', JSON.stringify({ pf, orders: o16e.map(o => [o.ticker, o.price]), hook: !!W.onBalance }));
+  W.onBalance = null; delete W.live[fall.ticker]; for (const m of [fall, hold]) delete W.markets[m.ticker];
   await send('/_ctclock off'); await send('/set latelive 0'); await wait(200);
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);

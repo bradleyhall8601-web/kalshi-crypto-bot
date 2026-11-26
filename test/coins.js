@@ -150,11 +150,15 @@ if (!RESTARTED) {
   console.log('\n6. Daily markets (5 PM ET)');
   clear(); await wait(21000); o0 = W.orders.length; // let Kalshi's position list (cached 20s) show the closed positions gone
   const nx = next5pmET(), mins = (nx.t - Date.now()) / 60e3;
-  await send('/set dailymin 1000'); await wait(200);
-  const dly0 = market('KXBTCD', 'btc', mins, 59900, -0.17, { ev: `KXBTCD-${nx.code}`, close: nx.t });
-  await send('/scan'); await wait(4000);
-  ok(!orders().slice(o0).includes(dly0.ticker), 'small wallet: daily markets skipped (money stays free for 15-min turnover)');
-  delete W.markets[dly0.ticker]; await send('/set dailymin 0'); await wait(200); o0 = W.orders.length;
+  // within MAX_MINUTES (70) of 5 PM ET the daily sits inside the normal hourly window, so the small-wallet skip rightly doesn't apply (it turns over within the hour);
+  // the check can only run outside that hour (11/26 the suite failed between ~3:50 and 5 PM ET for this reason alone)
+  if (mins > 70) {
+    await send('/set dailymin 1000'); await wait(200);
+    const dly0 = market('KXBTCD', 'btc', mins, 59900, -0.17, { ev: `KXBTCD-${nx.code}`, close: nx.t });
+    await send('/scan'); await wait(4000);
+    ok(!orders().slice(o0).includes(dly0.ticker), 'small wallet: daily markets skipped (money stays free for 15-min turnover)');
+    delete W.markets[dly0.ticker]; await send('/set dailymin 0'); await wait(200); o0 = W.orders.length;
+  } else ok(true, `small-wallet daily check skipped (${Math.round(mins)} min to 5 PM ET: the daily trades like an hourly then)`);
   const dK = mins < 150 ? 59990 : 59900; // close to 5 PM ET a far strike is already decided (6¢) — keep the test market tradable at any hour
   const dly = market('KXBTCD', 'btc', mins, dK, -0.17, { ev: `KXBTCD-${nx.code}`, close: nx.t });
   const far = market('KXBTCD', 'btc', 300, 59900, -0.12, { close: Math.floor((Date.now() + 300 * 60e3) / 3600e3) * 3600e3 + 1800e3 }); // ~5h out at :30 → not a daily, not within the hour

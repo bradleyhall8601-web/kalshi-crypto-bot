@@ -92,6 +92,7 @@ global.fetch = async (url, o = {}) => {
     if (W.fail429 > 0) { W.fail429--; return J({ error: { code: 'too_many_requests' } }, 429); }
     if (path.endsWith('/series')) return J({ series: ['BTC', 'ETH', 'SOL'].flatMap(c => [{ ticker: `KX${c}D`, frequency: 'hourly' }, { ticker: `KX${c}15M`, frequency: 'fifteen_min' }]) });
     if (path.endsWith('/portfolio/balance')) {
+      if (W.onBalance && (!W.onBalance.after || (W.bookReads || {})[W.onBalance.after])) { const f = W.onBalance; W.onBalance = null; f(); } // tests: change the market while the bot checks its account (once it has quoted market .after: between its quote and its order)
       const total = Object.values(W.shards).reduce((a, x) => a + x, 0);
       return J({ balance: Math.round(total * 100), balance_dollars: total.toFixed(4), portfolio_value: 0, balance_breakdown: Object.entries(W.shards).map(([k, v]) => ({ exchange_index: Number(k), balance: v.toFixed(4) })) });
     }
@@ -155,7 +156,7 @@ global.fetch = async (url, o = {}) => {
       return J({ order_id: 'o' + W.orders.length, fill_count: count.toFixed(2), remaining_count: '0.00', average_fill_price: fillYes.toFixed(4), average_fee_paid: (fee / count).toFixed(4), ts_ms: 1 }, 201);
     }
     const ob = path.match(/\/markets\/([^/]+)\/orderbook$/);
-    if (ob) { const m = W.markets[ob[1]]; if (!m) return J({ error: 'not found' }, 404); const q = String(W.bookQty ?? 100);
+    if (ob) { const m = W.markets[ob[1]]; if (!m) return J({ error: 'not found' }, 404); const q = String(W.bookQty ?? 100); W.bookReads = W.bookReads || {}; W.bookReads[ob[1]] = (W.bookReads[ob[1]] || 0) + 1;
       if (W.listStale) { /* book is live even when the list is stale */ }
       const live = (W.live && W.live[ob[1]]) || m;
       return J({ orderbook_fp: { yes_dollars: [[Number(live.yes_bid_dollars).toFixed(4), q]], no_dollars: [[(1 - Number(live.yes_ask_dollars)).toFixed(4), q]] } }); }

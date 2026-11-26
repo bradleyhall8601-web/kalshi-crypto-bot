@@ -874,6 +874,13 @@ async function lateLive(m, side, px, name = '12th-minute', { mult = 1, per = CFG
   const lim = Math.max(px, Math.min(CFG.LATE_MAX, Math.round((px + CFG.LATE_GRACE) * 100) / 100)); // live: a cent of room so a 1¢ tick doesn't miss the fill (live 11/24: 3 of 5 missed)
   let { count, room, a, open } = await lateCount(lim, mult, per);
   if (count < 1) { log('LATE LIVE skip', m.ticker, 'room', room.toFixed(2), 'cash', a.cash, 'open', open.toFixed(2)); return; }
+  if (isFast(String(m.ticker).split('-')[0])) { // re-check the book right before the order: the account check takes ~1–2 s and a leader can collapse in between, and a buy limit has no floor
+    // (live 11/26: DOGE quoted 64¢ → filled 56¢ at 12:00 PM CT, NEAR 69¢ → 53¢ at 2:30 PM CT; both lost)
+    let q = null; try { q = await withLiveQuote(m); } catch (e) { log('LATE LIVE recheck failed', m.ticker, e.message); }
+    if (q) { const ask = side === 'yes' ? d(q, 'yes_ask') : d(q, 'no_ask');
+      if (!(ask > 0)) { log('LATE LIVE skip', m.ticker, side, 'no ask before the order'); return; }
+      if (ask < px - 0.005) log('LATE LIVE recheck', m.ticker, side, 'quoted', px, 'now', ask);
+      if (lateLiveSkip(m, ask)) return; } }
   let r = await placeBuy({ ticker: m.ticker, side, count, price: lim, auto: true, fund: room });
   let part = null; if (r.filled > 0 && r.filled < 1) { log('LATE LIVE partial', m.ticker, side, r.filled, 'of', count); part = r; r = { filled: 0 }; } // a sliver (live 11/25: 0.01 of a contract): keep it and try once more for the full size
   if (!(r.filled > 0)) { // missed: usually the leader got stronger in the second before the order. Re-quote once and retry if it's still the leader and at most 3¢ (and latemax) higher
@@ -884,7 +891,7 @@ async function lateLive(m, side, px, name = '12th-minute', { mult = 1, per = CFG
     const yb = d(q, 'yes_bid'), ya = d(q, 'yes_ask'), na = d(q, 'no_ask'), mid = (yb + ya) / 2, ask = side === 'yes' ? ya : na;
     const still = side === 'yes' ? mid >= 0.53 : mid <= 0.47, lim2 = Math.min(CFG.LATE_MAX, Math.round((ask + CFG.LATE_GRACE) * 100) / 100);
     const need = part ? Math.round((count - part.filled) * 100) / 100 : count; // after a sliver, only the rest (live 11/26 12:15 PM: 0.6 + a full 1 = 1.6 HYPE contracts)
-    if (!still || !(ask > 0) || ask > Math.min(CFG.LATE_MAX, px + 0.03) || need * lim2 + feeTotal(need, lim2) > room + 0.03) { log('LATE LIVE no retry', m.ticker, side, 'ask now', ask, still ? '' : 'leader changed'); if (!keep()) return; }
+    if (!still || !(ask > 0) || ask > Math.min(CFG.LATE_MAX, px + 0.03) || lateLiveSkip(m, ask) || need * lim2 + feeTotal(need, lim2) > room + 0.03) { log('LATE LIVE no retry', m.ticker, side, 'ask now', ask, still ? '' : 'leader changed'); if (!keep()) return; }
     else {
     r = await placeBuy({ ticker: m.ticker, side, count: need, price: lim2, auto: true });
     if (!(r.filled > 0)) { log('LATE LIVE retry not filled', m.ticker, side, 'limit', lim2); if (!keep()) return; }
