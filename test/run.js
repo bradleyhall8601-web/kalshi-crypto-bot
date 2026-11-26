@@ -287,7 +287,9 @@ const btn = (a, i = 0) => a.reply_markup.inline_keyboard[0][i].callback_data;
   ok(msgs().filter(m => /🚧 BTC trading paused/.test(m.text)).length === 1, 'block reported once, not every scan');
   W.shock = null;
   await send(post, '/scan'); await wait(900);
-  ok(msgs().some(m => /✅ BTC conditions clear again/.test(m.text)), 'all-clear reported');
+  ok(!msgs().some(m => /✅ BTC conditions clear again/.test(m.text)), 'no all-clear the moment it passes (a flicker would make it a lie)');
+  await send(post, '/_clearage'); await send(post, '/scan'); await wait(900);
+  ok(msgs().some(m => /✅ BTC conditions clear again/.test(m.text)), 'all-clear reported after 3 calm minutes');
   clearMarkets();
 
   console.log('\n11h. Auto hourly markets (BTC & ETH) with live re-pricing');

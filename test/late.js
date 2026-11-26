@@ -295,6 +295,96 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(W.orders.length === r14 + (zo ? (W.orders.slice(r14).length) : 0) && !W.orders.slice(r14).some(o => /KXBTCD-26NOV2520/.test(o.ticker)), 'the scanner only watches (no orders)');
   await send('/set latelive 0'); await wait(200);
 
+  console.log('\n15. Real resting bids and real early sales (Brad 11/25 evening: "Do what\'s needed"), checks during safety pauses');
+  for (const k of Object.keys(W.markets)) if (W.markets[k].status === 'open') delete W.markets[k];
+  await send('/_livereset'); await send('/set latelive 0'); await wait(300); W.shards[0] = 15.66; W.shards[2] = 0;
+  const soldEarly = async () => { await send('/paper'); await wait(400); const x = last().match(/(\d+) sold early/); return x ? +x[1] : -1; };
+  const missN = async () => { await send('/paper'); await wait(400); const x = last().match(/(\d+) bids never filled/); return x ? +x[1] : -1; };
+  // 15a: a safety pause no longer hides a flip or a bid's fate
+  const pA15 = market('KXSOL15M', 2.9, 0.80), pB15 = market('KXXRP15M', 2.9, 0.80);
+  await send('/_fasttick'); await wait(3500);
+  const se0 = await soldEarly(), mi0 = await missN();
+  W.shock = { coin: 'btc', pct: -0.02 }; // BTC drops 2%: every coin is paused
+  pA15.close_time = new Date(Date.now() + 1.5 * 60e3).toISOString(); pA15.yes_bid_dollars = '0.4000'; pA15.yes_ask_dollars = '0.4200'; // SOL flips mid-pause
+  await send('/_fasttick'); await wait(3500);
+  ok(msgs().some(m => /🚧 .*trading paused — BTC sudden drop/.test(m)) && await soldEarly() === se0 + 1, 'during a safety pause the sell-early test still sees SOL flip', last());
+  pB15.close_time = new Date(Date.now() + 0.9 * 60e3).toISOString();
+  await send('/_fasttick'); await wait(3500);
+  ok(await missN() === mi0 + 1, 'during a safety pause an unfilled bid is still closed out at 1 min left (XRP; SOL\'s crash filled its bid)', last());
+  // 15d (pause messages): no "clear" until 3 calm minutes; a flicker stays one "paused"; a new pause after a "clear" is always said
+  const pz0 = msgs().filter(m => /trading paused/.test(m)).length, cz0 = msgs().filter(m => /conditions clear again/.test(m)).length;
+  W.shock = null; await send('/_fasttick'); await wait(3000);
+  ok(msgs().filter(m => /conditions clear again/.test(m)).length === cz0, 'no "clear" message the moment the shock passes');
+  W.shock = { coin: 'btc', pct: -0.02 }; await send('/_fasttick'); await wait(3000);
+  ok(msgs().filter(m => /trading paused/.test(m)).length === pz0, 'it flickers back within 3 minutes: no second "paused" (Brad never heard "clear")');
+  W.shock = null; await send('/_fasttick'); await wait(3000); await send('/_clearage'); await send('/_fasttick'); await wait(3000);
+  ok(msgs().filter(m => /conditions clear again/.test(m)).length === cz0 + 1, '"clear" is said after 3 calm minutes', msgs().slice(-3).join(' || '));
+  W.shock = { coin: 'btc', pct: -0.02 }; await send('/_fasttick'); await wait(3000);
+  ok(msgs().filter(m => /trading paused/.test(m)).length === pz0 + 1, 'a new pause right after "clear" is always said (11/25 6:30 PM was skipped in silence)');
+  W.shock = null; await send('/_fasttick'); await wait(2500); await send('/_clearage'); await send('/_fasttick'); await wait(2500);
+  for (const m of [pA15, pB15]) delete W.markets[m.ticker];
+  // 15b: "sell early if it flips" leads real money: real buys, then a real reduce-only sale when the side drops to 45¢ or less
+  await send('/_lateelig m12x'); await send('/_champ m12x'); await send('/set latelive 1'); await wait(300);
+  const r15 = W.orders.length, s0 = (W.sells || []).length;
+  const xY = market('KXETH15M', 2.9, 0.80), xN = market('KXDOGE15M', 2.9, 0.15); xN.close_time = xY.close_time;
+  await send('/_fasttick'); await wait(4500);
+  const LVp = () => pinned().PAPERS.late.live.pos || [];
+  await until(() => LVp().filter(o => o.x).length === 2);
+  const pY = LVp().find(o => o.t === xY.ticker), pN = LVp().find(o => o.t === xN.ticker);
+  ok(pY && pY.x === 1 && pN && pN.x === 1 && W.orders.slice(r15).filter(o => o.time_in_force === 'immediate_or_cancel' && !o.reduce_only).length === 2, 'real buys at the 12th minute, marked for the sell-early rule', JSON.stringify(LVp()));
+  await send('/_fasttick'); await wait(3000);
+  ok((W.sells || []).length === s0, 'no sale while each side still leads');
+  for (const m of [xY, xN]) m.close_time = new Date(Date.now() + 1.5 * 60e3).toISOString();
+  xY.yes_bid_dollars = '0.4000'; xY.yes_ask_dollars = '0.4200';          // ETH YES falls to a 40¢ bid
+  xN.yes_bid_dollars = '0.5800'; xN.yes_ask_dollars = '0.6000';          // DOGE flips: NO's bid is 1 − 60¢ = 40¢
+  await send('/_fasttick'); await wait(5000);
+  const sl = W.orders.slice(r15).filter(o => o.reduce_only);
+  ok(sl.length === 2 && sl.every(o => o.time_in_force === 'immediate_or_cancel') && sl.some(o => o.ticker === xY.ticker && o.side === 'ask' && o.price === '0.3900') && sl.some(o => o.ticker === xN.ticker && o.side === 'bid' && o.price === '0.6100'),
+    'reduce-only IOC sales: ETH YES offered at 39¢+, DOGE NO sold by bidding YES at ≤61¢ (= NO at 39¢+)', JSON.stringify(sl));
+  ok((W.sells || []).length === s0 + 2 && W.sells.slice(s0).every(x => Math.abs(x.got - 0.40) < 1e-9), 'both filled at the 40¢ bid', JSON.stringify(W.sells.slice(s0)));
+  ok(!W.positions.some(p => p.ticker === xY.ticker || p.ticker === xN.ticker), 'both Kalshi positions are closed (nothing left, nothing opened)', JSON.stringify(W.positions.filter(p => /ETH15M|DOGE15M/.test(p.ticker))));
+  const soldMsg = msgs().filter(m => /🔻 SOLD EARLY/.test(m));
+  ok(soldMsg.length === 2 && /bought @ 81¢ → sold @ 40¢ with 1\.\d min left: −\$0\.\d\d \(riding it to a loss would be −\$0\.8\d\)/.test(soldMsg.join('\n')) && soldMsg.every(m => /📊 Today \d+W·\d+L/.test(m)), 'Telegram: each early sale, what it saved vs riding it to $0, today\'s tally', soldMsg.join(' || '));
+  await until(() => LVp().filter(o => o.sn >= o.n).length === 2);
+  const LV15 = pinned().PAPERS.late.live, want15 = LV15.pos.reduce((a, o) => a + o.sp - o.cost, 0), cost15 = LV15.pos.reduce((a, o) => a + o.cost, 0);
+  ok(LV15.pos.every(o => o.sn === o.n && o.sp > 0) && LV15.xadj < 0 && (LV15.soldT || []).length === 2, 'sales saved (sold count, proceeds, the all-time adjustment, sold tickers)', JSON.stringify(LV15));
+  const o15 = W.orders.length; await send('/_fasttick'); await wait(3000);
+  ok(!W.orders.slice(o15).some(o => o.reduce_only), 'sold positions are not sold again');
+  // graded once Kalshi has the result: the sale is the result (here both would have lost: the sale saved money)
+  settle(xY, 'no'); settle(xN, 'yes');
+  W.settlements.push({ ticker: xY.ticker, market_result: 'no', yes_count_fp: '0.00', no_count_fp: '0.00', yes_total_cost_dollars: '0', no_total_cost_dollars: '0', revenue: 0, fee_cost: '0', settled_time: new Date().toISOString() });
+  const tally0 = msgs().filter(m => /🧾 RESULTS|🏆 WIN|💔 LOSS/.test(m)).length;
+  await send('/_livelateclosed'); await send('/scan'); await wait(6000);
+  await until(() => (pinned().PAPERS.late.live.pos || []).length === 0);
+  const LVg = pinned().PAPERS.late.live;
+  ok(LVg.n === 2 && LVg.w === 0 && Math.abs(LVg.sum - want15) < 0.011 && LVg.sum > -cost15 + 0.5, 'real record: the two sales (proceeds − cost), not two total losses', JSON.stringify({ LVg, want15, cost15 }));
+  ok(Math.abs(LVg.xadj - want15) < 0.011, 'all-time profit adjustment equals the sale results', JSON.stringify(LVg.xadj));
+  ok(msgs().filter(m => /🧾 RESULTS|🏆 WIN|💔 LOSS/.test(m)).length === tally0, 'Kalshi\'s empty settlement for a fully sold market is not reported as a result (the sale already was)');
+  // 15c: "bid 2¢ under" leads real money: a real resting bid (expires by itself at 1 min left), filled → real position; unfilled → cancelled
+  await send('/_livereset'); await send('/_lateelig m12b'); await send('/_champ m12b'); await send('/set latelive 1'); await wait(300); W.shards[0] = 15.66;
+  const rb15 = W.orders.length;
+  const bY = market('KXBNB15M', 2.9, 0.80), bM = market('KXHYPE15M', 2.9, 0.80); bM.close_time = bY.close_time;
+  await send('/_fasttick'); await wait(4500);
+  const bo = W.orders.slice(rb15);
+  const gY = bo.find(o => o.ticker === bY.ticker), gM = bo.find(o => o.ticker === bM.ticker);
+  ok(gY && gY.time_in_force === 'good_till_canceled' && gY.price === '0.7900' && !gY.post_only && Math.abs(gY.expiration_time * 1000 - (Date.parse(bY.close_time) - 60e3)) < 1500 && gM && gM.price === '0.7900',
+    'real bids at 79¢ (2¢ under the 81¢ ask), expiring by themselves at 1 min left', JSON.stringify(bo));
+  ok(!bo.some(o => o.time_in_force === 'immediate_or_cancel'), 'no ask-paying buy when the bid rule leads');
+  const rid = Object.keys(W.resting).find(id => W.resting[id].ticker === bY.ticker);
+  W.fillResting(rid, Number(gY.count)); bY.yes_ask_dollars = '0.7900'; bY.yes_bid_dollars = '0.7700'; // a seller comes down to us
+  await send('/_fasttick'); await wait(4000);
+  await until(() => (pinned().PAPERS.late.live.pos || []).some(o => o.t === bY.ticker));
+  const fb = (pinned().PAPERS.late.live.pos || []).find(o => o.t === bY.ticker);
+  ok(fb && Math.abs(fb.px - 0.79) < 1e-9 && fb.n === Number(gY.count) && fb.oid === rid, 'the filled bid is a real position at 79¢', JSON.stringify(fb));
+  ok(msgs().some(m => /💵 REAL BUY \(12th-min · bid 2¢ under\) · 1 coin[\s\S]*@ 79¢ \(bid, not ask 💡\)/.test(m)), 'Telegram: real buy at the bid', msgs().filter(m => /REAL BUY/.test(m)).slice(-1)[0]);
+  for (const m of [bY, bM]) m.close_time = new Date(Date.now() + 0.9 * 60e3).toISOString();
+  const c0 = W.cancels.length;
+  await send('/_fasttick'); await wait(4000);
+  const mid = Object.keys(W.resting).find(id => W.resting[id].ticker === bM.ticker);
+  ok(W.cancels.slice(c0).includes(mid) && !(pinned().PAPERS.late.live.pos || []).some(o => o.t === bM.ticker), 'HYPE: no seller came by 1 min left → bid cancelled, nothing bought', JSON.stringify(W.cancels.slice(c0)));
+  ok(!JSON.stringify(pinned().PAPERS.late).includes('lbids'), 'resting late bids are not in the pinned save (memory only; Kalshi expires them)');
+  await send('/set latelive 0'); await send('/_champ m12'); await wait(200);
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('TEST CRASH', e); process.exit(1); });

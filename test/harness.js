@@ -116,6 +116,20 @@ global.fetch = async (url, o = {}) => {
       const costPer = b.side === 'bid' ? yesPx : 1 - yesPx;
       const idx = b.exchange_index ?? 0;
       W.orders.push(b);
+      if (b.reduce_only) { // closing a position: capped at what's held; never opens or grows one (like Kalshi)
+        if (b.time_in_force !== 'immediate_or_cancel') return J({ error: { code: 'invalid_order', details: 'reduce_only can only be used with IoC orders' } }, 400);
+        const pos = W.positions.filter(p => p.ticker === b.ticker).reduce((a, p) => a + Number(p.position), 0);
+        const n = (b.side === 'ask' ? pos > 0 : pos < 0) ? Math.min(count, Math.abs(pos)) : 0;
+        const bidYes = Number(m.yes_bid_dollars), askYes = Number(m.yes_ask_dollars), fillYes = b.side === 'ask' ? bidYes : askYes;
+        const can = b.side === 'ask' ? bidYes >= yesPx - 1e-9 : askYes <= yesPx + 1e-9;
+        if (!(n > 0) || !can || W.sellFill === 'none') return J({ order_id: 'o' + W.orders.length, fill_count: '0.00', remaining_count: '0.00', ts_ms: 1 }, 201);
+        const got = b.side === 'ask' ? fillYes : 1 - fillYes, fee = Math.ceil(0.07 * n * got * (1 - got) * 100) / 100;
+        W.shards[idx] = (W.shards[idx] || 0) + n * got - fee;
+        W.fills.push({ ticker: b.ticker, side: 'yes', action: b.side === 'bid' ? 'buy' : 'sell', count_fp: n.toFixed(2), yes_price_dollars: fillYes.toFixed(4), no_price_dollars: (1 - fillYes).toFixed(4), fee_cost: fee.toFixed(4) });
+        const net = pos + (b.side === 'ask' ? -n : n); W.positions = W.positions.filter(p => p.ticker !== b.ticker).concat(Math.abs(net) > 1e-9 ? [{ ticker: b.ticker, position: net, market_exposure_dollars: '0' }] : []);
+        W.sells = (W.sells || []).concat([{ ticker: b.ticker, n, got, fee }]);
+        return J({ order_id: 'o' + W.orders.length, fill_count: n.toFixed(2), remaining_count: '0.00', average_fill_price: fillYes.toFixed(4), average_fee_paid: (fee / n).toFixed(4), ts_ms: 1 }, 201);
+      }
       if (b.time_in_force === 'good_till_canceled') { // resting limit order (maker)
         const askYes = Number(m.yes_ask_dollars), bidYes = Number(m.yes_bid_dollars);
         const crosses = b.side === 'bid' ? yesPx >= askYes - 1e-9 : yesPx <= bidYes + 1e-9;
@@ -124,6 +138,7 @@ global.fetch = async (url, o = {}) => {
         if ((W.shards[idx] || 0) < count * costPer) return J({ error: { code: 'insufficient_balance', message: 'insufficient balance' } }, 400);
         const id = 'r' + W.orders.length; W.shards[idx] -= count * costPer; // Kalshi holds the collateral
         W.resting[id] = { id, b, remaining: count, pay: costPer, idx, ticker: b.ticker };
+        if (crosses) { W.fillResting(id, count); return J({ order_id: id, fill_count: count.toFixed(2), remaining_count: '0.00', ts_ms: Date.now() }, 201); } // not post-only and the book is already at our price: fills on the spot
         return J({ order_id: id, fill_count: '0.00', remaining_count: count.toFixed(2), ts_ms: Date.now() }, 201);
       }
       if (W.jump && W.jump[b.ticker]) { const j = W.jump[b.ticker]; delete W.jump[b.ticker]; m.yes_ask_dollars = (Number(m.yes_ask_dollars) + j).toFixed(4); m.yes_bid_dollars = (Number(m.yes_bid_dollars) + j).toFixed(4); m.no_ask_dollars = (Number(m.no_ask_dollars) - j).toFixed(4); } // tests: price jumps just before the order lands
