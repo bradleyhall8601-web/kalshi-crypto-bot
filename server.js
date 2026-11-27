@@ -152,8 +152,8 @@ async function saveSettingsNow() {
   // 11/24: anchors + live record pushed it over again — keep trimming history (never settings, live record, stop flag, verdicts or anchors)
   if (text.length > 4090) { blob.NPS = (blob.NPS || []).slice(-3).map(x => { const t = news.storyTags(x.title), v = [...new Set([...(x.v || []), ...(t.v || [])])]; return { title: String(x.title).slice(0, 60), at: x.at, ...(x.c || t.c ? { c: 1 } : {}), ...(v.length ? { v } : {}) }; }); blob.SC = { ...S.sc, hist: (S.sc.hist || []).slice(-30) }; blob.PAPERS = { ...blob.PAPERS, late: lateBlob(5) }; text = zip(); }
   if (text.length > 4090) { blob.LANES = Object.fromEntries(Object.entries(S.lanes || {}).map(([k, v]) => [k, { ...v, r: (v.r || []).slice(-6) }])); blob.PAPERS = { ...blob.PAPERS, r: (S.paper.r || []).slice(-50) }; text = zip(); }
-  if (text.length > 4090 && blob.OT && blob.OT.p) { blob.OT = OT.blob(false); text = zip(); log('SETTINGS: open weather/sports practice bets kept in memory only (no room)'); } // records stay; only the open paper bets drop
-  if (text.length > 4090) { delete blob.LRN; blob.SC = { ...S.sc, hist: [] }; text = zip(); } // research results are rebuilt by the next research run
+  if (text.length > 4090) { delete blob.LRN; blob.SC = { ...S.sc, hist: [] }; text = zip(); } // research results are rebuilt by the next research run (3 min after a restart)
+  if (text.length > 4090 && blob.OT && blob.OT.p) { blob.OT = OT.blob(false); text = zip(); if (Date.now() - (S.otRoomLog || 0) > 3600e3) { S.otRoomLog = Date.now(); log('SETTINGS: open weather/sports practice bets kept in memory only (no room)'); } } // records stay; only the open paper bets drop
   if (text.length > 4090) { if (Date.now() - (S.bigWarn || 0) > 3600e3) { S.bigWarn = Date.now(); log('SETTINGS TOO BIG', text.length, 'chars — not saved'); say('⚠️ Settings too big to save — tell Claude.').catch(() => {}); } return; }
   if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok || /not modified/.test(r.error || '')) return; }
   const r = await tg('sendMessage', { chat_id: OWNER, text, disable_notification: true });
