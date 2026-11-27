@@ -27,7 +27,9 @@ const RULES = [
 ];
 const LIVE_MIN_N = 20; // a rule needs this many practice trades of its own before real money follows it
 const EDGE = { wxf: 0.06, wxl: 0.05, spp: 0.04, spl: 0.03 }; // after the taker fee
-const TEMP_ALERT = /heat|freeze|frost|winter|wind chill|cold|blizzard|ice|snow|storm|red flag|high wind|fog/i; // alerts that make a high-temperature forecast less certain
+const TEMP_ALERT = /heat|freeze|frost|winter|wind chill|cold|blizzard|ice storm|snow/i; // alerts that make a high-temperature forecast less certain (wind/fog alerts don't)
+const MAX_GAP = 0.15; // the model may differ from the market's own price by at most 15¢: a bigger gap almost always means the model is missing something (live 11/26 9:17 PM: it wanted NO at 9¢ on Chicago's 44–45° with the high already at 45°F)
+const CITY_S = { KXHIGHMIA: 0.6, KXHIGHLAX: 0.8 }; // steadier climates: smaller forecast errors
 const INJURY = /\b(injur\w*|ruled out|out for|won'?t play|will not play|not playing|questionable|doubtful|suspend\w*|ejected|illness|scratch\w*|inactive|day-to-day|carted|concussion|placed on|sidelined|game-time decision)\b/i;
 const MON = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
 const ALIAS = { WAS: 'WSH', JAC: 'JAX', GSW: 'GS', NYK: 'NY', SAS: 'SA', NOP: 'NO', UTA: 'UTAH', TBL: 'TB', NJD: 'NJ', SJS: 'SJ', LAK: 'LA', LA: 'LAR' }; // Kalshi codes ESPN spells differently (names are matched too)
@@ -56,9 +58,9 @@ function bracket(m) {
   if (b) { const mid = Number(b[1]); return [mid - 0.5, mid + 0.5]; }
   return null;
 }
-// the day's official high V (whole °F): P(V ≤ t) = F(t + 0.5). L = observed high so far (the official one is usually a bit higher: it counts the
-// minutes between hourly readings), mu/s = the forecast for what's still to come. No observations yet: just the forecast.
-const cdf = ({ L, mu, s }) => t => (mu === mu && mu > -Infinity ? Phi((t - mu) / s) : 1) * (L > -Infinity ? Phi((t - L - 0.3) / 0.8) : 1);
+// the day's official high V (whole °F): P(V ≤ t) = F(t + 0.5). L = observed high so far: a floor — the official high is never below it and only
+// sometimes a degree above (it counts the minutes between hourly readings); mu/s = the forecast for what's still to come. No observations yet: just the forecast.
+const cdf = ({ L, mu, s }) => t => (mu === mu && mu > -Infinity ? Phi((t - mu) / s) : 1) * (L > -Infinity ? (t < L ? 0 : 2 * Phi((t - L) / 0.35) - 1) : 1);
 function probYes(br, F) { const [lo, hi] = br; return Math.max(0, Math.min(1, (hi === Infinity ? 1 : F(hi + 0.5)) - (lo === -Infinity ? 0 : F(lo - 0.5)))); }
 const brText = br => br[1] === Infinity ? `${br[0]}°+` : br[0] === -Infinity ? `${br[1]}° or below` : `${br[0]}–${br[1]}°`;
 const inBr = (br, v) => v >= br[0] && v <= br[1];
@@ -111,11 +113,11 @@ function create(deps) {
     catch (e) { if (fresh) throw new Error('NWS alerts unavailable'); log('OTHER wx alerts failed', st.id, e.message); } // the check right before a bet must have them
     return { max, temp, obs, alerts };
   }
-  function wxModel(k, info, ds, t) {
+  function wxModel(k, info, ds, t, series) {
     const de = ds + 24 * 3600e3, dayMax = info.max.filter(x => x.a >= ds - 6 * 3600e3 && x.a < de).sort((a, b) => Math.abs(a.a - ds - 12 * 3600e3) - Math.abs(b.a - ds - 12 * 3600e3))[0];
     const rest = info.temp.filter(x => x.b > t && x.a < de), restMax = rest.length ? Math.max(...rest.map(x => x.v)) : -Infinity;
-    const alert = [...new Set(info.alerts.filter(a => TEMP_ALERT.test(a)))], wide = alert.length ? 1.5 : 1;
-    if (k === 'wxf') { if (!dayMax) return null; const lead = (ds + 15 * 3600e3 - t) / 3600e3; return { L: info.obs, mu: dayMax.v, s: (sig('wxf') || (lead > 24 ? 3.2 : 2.5)) * wide, alert, restMax }; }
+    const alert = [...new Set(info.alerts.filter(a => TEMP_ALERT.test(a)))], wide = alert.length ? 1.3 : 1;
+    if (k === 'wxf') { if (!dayMax) return null; const lead = (ds + 15 * 3600e3 - t) / 3600e3; return { L: info.obs, mu: dayMax.v, s: (sig('wxf') || (lead > 24 ? 2.6 : 2.0) * (CITY_S[series] || 1)) * wide, alert, restMax }; }
     if (!(info.obs > -Infinity)) return null;
     return { L: info.obs, mu: restMax, s: (sig('wxl') || 1.5) * wide, alert, restMax };
   }
@@ -132,7 +134,7 @@ function create(deps) {
         const k = t < ds + 11 * 3600e3 && t > ds - 36 * 3600e3 ? 'wxf' : hr >= 16 ? 'wxl' : null; // forecast rule: up to 11 AM local that day; late rule: from 4 PM local (the high is usually in)
         if (!k || has(ev, k)) continue;
         try { info = await wxInfo(st, ds); } catch (e) { log('OTHER wx data failed', st.id, e.message); continue; }
-        const model = wxModel(k, info, ds, t); if (!model) continue;
+        const model = wxModel(k, info, ds, t, series); if (!model) continue;
         const F = cdf(model), notes = [];
         const pm = mem.prevMu[ev + k]; if (k === 'wxf' && pm !== undefined && Math.abs(pm - model.mu) >= 2) notes.push(`forecast moved ${Math.round(pm)}→${Math.round(model.mu)}°F`); mem.prevMu[ev + k] = model.mu;
         let best = null;
@@ -140,14 +142,14 @@ function create(deps) {
           const br = bracket(m); if (!br) continue;
           const p = probYes(br, F), ya = num(m.yes_ask_dollars), na = num(m.no_ask_dollars), yb = num(m.yes_bid_dollars), nb = num(m.no_bid_dollars);
           for (const [side, ask, bid, q] of [['yes', ya, yb, p], ['no', na, nb, 1 - p]]) {
-            if (!(ask >= 0.08 && ask <= 0.94) || !(bid > 0) || ask - bid > 0.12) continue; // skip lottery tickets, sure things and empty books
+            if (!(ask >= 0.08 && ask <= 0.94) || !(bid > 0) || ask - bid > 0.12 || Math.abs(q - (ask + bid) / 2) > MAX_GAP) continue; // skip lottery tickets, sure things, empty books and wild disagreements
             const edge = q - ask - fee1(ask); if (!best || edge > best.edge) best = { m, side, px: ask, q, edge, br };
           }
         }
         if (!best || best.edge < EDGE[k]) continue;
         out.push({ k, m: best.m, ev, side: best.side, px: best.px, q: best.q, mu: model.mu, c: Date.parse(best.m.expected_expiration_time || best.m.close_time) || ds + 36 * 3600e3, src: { st: st.id, ds, br: best.br },
           // right before the bet: fresh NWS forecast, observations and alerts, and the same probability again
-          recheck: async () => { const i2 = await wxInfo(st, ds, true), m2 = wxModel(k, i2, ds, now()); if (!m2) return { ok: false, why: 'NWS data changed' };
+          recheck: async () => { const i2 = await wxInfo(st, ds, true), m2 = wxModel(k, i2, ds, now(), series); if (!m2) return { ok: false, why: 'NWS data changed' };
             const p2 = probYes(best.br, cdf(m2)); return { ok: true, q: best.side === 'yes' ? p2 : 1 - p2, why: wxDesc(k, m2) + (notes.length ? ' · ' + notes.join(', ') : '') }; },
           text: (px, q, why) => `${RULES.find(x => x.k === k).icon} ${CITY[series] || series} high · ${date.slice(5)} · ${best.side.toUpperCase()} on ${brText(best.br)} @ ${cents(px)} · model ${Math.round(q * 100)}% · ${why}` });
       }
@@ -176,7 +178,7 @@ function create(deps) {
       const fresh3h = newsFor(arts, g.comps, t - 3 * 3600e3); if (fresh3h.length) return { skip: 'fresh news: ' + fresh3h[0].headline }; // the line may not have caught up
       const pHome = ih / (ih + ia); let best = null;
       for (const i of [0, 1]) { const m = hit.mk[i], ask = num(m.yes_ask_dollars), bid = num(m.yes_bid_dollars), q = i === home ? pHome : 1 - pHome;
-        if (!(ask >= 0.15 && ask <= 0.9) || !(bid > 0) || ask - bid > 0.06) continue; const edge = q - ask - fee1(ask); if (!best || edge > best.edge) best = { m, i, ask, q, edge }; }
+        if (!(ask >= 0.15 && ask <= 0.9) || !(bid > 0) || ask - bid > 0.06 || Math.abs(q - (ask + bid) / 2) > MAX_GAP) continue; const edge = q - ask - fee1(ask); if (!best || edge > best.edge) best = { m, i, ask, q, edge }; }
       if (!best) return { skip: 'no usable book' };
       return { m: best.m, i: best.i, px: best.ask, q: best.q, why: `sportsbooks ${Math.round(best.q * 100)}%${od.provider && od.provider.name ? ` (${od.provider.name})` : ''} · 📰 no injury news in 3 h` };
     }
@@ -209,7 +211,7 @@ function create(deps) {
         const hit = find(g); if (!hit || has(hit.ev, k)) continue;
         const r = await sportsEval(L, g, hit, k, arts, false); if (r.skip) { if (/news/.test(r.skip)) log('OTHER', k, 'skip', hit.ev, r.skip); continue; }
         const ask = r.px, bid = num(r.m.yes_bid_dollars);
-        if (!(ask >= (k === 'spl' ? 0.55 : 0.15) && ask <= (k === 'spl' ? 0.95 : 0.9)) || !(bid > 0) || ask - bid > 0.06 || r.q - ask - fee1(ask) < EDGE[k]) continue;
+        if (!(ask >= (k === 'spl' ? 0.55 : 0.15) && ask <= (k === 'spl' ? 0.95 : 0.9)) || !(bid > 0) || ask - bid > 0.06 || Math.abs(r.q - (ask + bid) / 2) > MAX_GAP || r.q - ask - fee1(ask) < EDGE[k]) continue;
         out.push({ k, m: r.m, ev: hit.ev, side: 'yes', px: ask, q: r.q, c: Date.parse(r.m.expected_expiration_time || r.m.close_time) || g.start + 4 * 3600e3, src: { lg: L.espn, id: g.e.id, ab: String(((g.comps[r.i] || {}).team || {}).abbreviation || '') },
           // right before the bet: a fresh scoreboard, win %, sportsbook line and news, and the same judgment again
           recheck: async () => { const e2 = (await scoreboard(L, true)).find(e => e.id === g.e.id); if (!e2) return { ok: false, why: 'game not on the scoreboard' };
@@ -232,9 +234,10 @@ function create(deps) {
       if (has(x.ev, x.k)) continue;
       let c; try { c = await x.recheck(); } catch (e) { c = { ok: false, why: e.message }; }
       if (!c.ok) { log('OTHER recheck: no bet', x.k, x.m.ticker, c.why); continue; }
-      let ask = x.px; if (quote) { try { const qb = await quote(x.m), a = x.side === 'yes' ? num(qb.yes_ask_dollars) : num(qb.no_ask_dollars); if (!(a > 0)) { log('OTHER recheck: no bet', x.m.ticker, 'empty book'); continue; } ask = a; } catch (e) { log('OTHER recheck: no bet', x.m.ticker, 'book unavailable', e.message); continue; } }
-      const edge = c.q - ask - fee1(ask);
-      if (!(edge >= EDGE[x.k]) || ask > 0.95) { log('OTHER recheck: no bet', x.k, x.m.ticker, 'edge gone', `p ${c.q.toFixed(3)} ask ${ask}`); continue; }
+      let ask = x.px, bid = NaN; if (quote) { try { const qb = await quote(x.m), ya = num(qb.yes_ask_dollars), yb = num(qb.yes_bid_dollars); ask = x.side === 'yes' ? ya : num(qb.no_ask_dollars); bid = x.side === 'yes' ? yb : 1 - ya;
+        if (!(ask > 0)) { log('OTHER recheck: no bet', x.m.ticker, 'empty book'); continue; } } catch (e) { log('OTHER recheck: no bet', x.m.ticker, 'book unavailable', e.message); continue; } }
+      const edge = c.q - ask - fee1(ask), gap = bid > 0 ? Math.abs(c.q - (ask + bid) / 2) : 0;
+      if (!(edge >= EDGE[x.k]) || ask > 0.95 || gap > MAX_GAP) { log('OTHER recheck: no bet', x.k, x.m.ticker, gap > MAX_GAP ? 'model too far from the market' : 'edge gone', `p ${c.q.toFixed(3)} ask ${ask}`); continue; }
       const line = x.text(ask, c.q, c.why);
       O.p.push({ k: x.k, t: x.m.ticker, ev: x.ev, side: x.side, px: ask, c: x.c, l: line.split(' · ').slice(0, 3).join(' · '), src: x.src, ...(typeof x.mu === 'number' && isFinite(x.mu) ? { mu: Math.round(x.mu * 10) / 10 } : {}) });
       lines.push(line + ' · ✔️ checked twice'); log('OTHER PAPER', x.k, x.m.ticker, x.side, ask, 'p', c.q.toFixed(3));

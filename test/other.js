@@ -29,7 +29,7 @@ const game = (id, state, startMs, home, away, more = {}) => ({ id, date: iso(sta
   ok(JSON.stringify(other.bracket({ ticker: 'X-T64', strike_type: 'greater', floor_strike: 64 })) === '[65,null]' && JSON.stringify(other.bracket({ ticker: 'X-T57', strike_type: 'less', cap_strike: 57 })) === '[null,56]'
     && JSON.stringify(other.bracket({ ticker: 'X-B62.5', strike_type: 'between', floor_strike: 62 })) === '[62,63]' && JSON.stringify(other.bracket({ ticker: 'X-B60.5', strike_type: 'between', floor_strike: 60, cap_strike: 61 })) === '[60,61]', 'Kalshi weather brackets: ">64" = 65°+, "<57" = 56° or below, B62.5 = 62–63°');
   const F = other.cdf({ L: 59, mu: 50, s: 1.5 }), pIn = other.probYes([58, 59], F), pAbove = other.probYes([62, Infinity], F);
-  ok(pIn > 0.5 && pIn < 0.7 && pAbove < 0.01 && other.probYes([-Infinity, 56], F) < 0.01, 'late day: observed high 59°F, cooling to 50°F → 58–59° likely, 62°+ and 56°− nearly impossible', JSON.stringify({ pIn, pAbove }));
+  ok(pIn > 0.8 && pIn < 0.95 && pAbove < 0.01 && other.probYes([-Infinity, 57], F) === 0, 'late day: observed high 59°F, cooling to 50°F → 58–59° likely, 62°+ nearly impossible, 57° or below impossible', JSON.stringify({ pIn, pAbove }));
   ok(other.teamMatch({ ticker: 'KXNBAGAME-26NOV27BOSNYK-NYK', yes_sub_title: 'New York' }, team('NY', 'New York', 'Knicks')) && other.teamMatch({ ticker: 'X-LAC', yes_sub_title: 'Los Angeles C' }, team('LAC', 'Los Angeles', 'Chargers'))
     && !other.teamMatch({ ticker: 'X-LAC', yes_sub_title: 'Los Angeles C' }, team('LAR', 'Los Angeles', 'Rams')) && other.teamMatch({ ticker: 'X-ORST', yes_sub_title: 'Oregon St.' }, team('OSU', 'Oregon State', 'Beavers')), 'team matching: NYK=NY, "Los Angeles C" = Chargers not Rams, "Oregon St." = Oregon State');
   ok(Math.abs(other.amer('-200') - 2 / 3) < 1e-9 && Math.abs(other.amer('+170') - 100 / 270) < 1e-9, 'American odds to probability');
@@ -53,8 +53,8 @@ const game = (id, state, startMs, home, away, more = {}) => ({ id, date: iso(sta
     KNYC: { lat: 40.7789, lon: -73.9692, tz: 'America/New_York', max: [{ validTime: `${iso(nyDs + 7 * 3600e3)}/PT12H`, value: C(58) }], temp: [], obs: [{ t: iso(nyDs + 14 * 3600e3), c: C(57) }], alerts: ['Winter Weather Advisory'] },
     KMDW: { lat: 41.786, lon: -87.7524, tz: lateTz, max: [], temp: [{ validTime: `${iso(Date.now() - 30 * 60e3)}/PT3H`, value: C(50) }], obs: [{ t: iso(Date.now() - 3 * 3600e3), c: C(59) }, { t: iso(Date.now() - 5 * 3600e3), c: C(55) }], alerts: [] } } };
   const nyR = { rules_primary: 'If the maximum temperature recorded at New York City (CLINYC) for the day…' }, chR = { rules_primary: 'If the maximum temperature recorded at Chicago Midway (CLIMDW) for the day…' };
-  const ny64 = mk(`${nyEv}-T64`, nyEv, 0.20, 0.19, { strike_type: 'greater', floor_strike: 64, ...nyR }); mk(`${nyEv}-B58.5`, nyEv, 0.20, 0.19, { strike_type: 'between', floor_strike: 58, cap_strike: 59, ...nyR }); mk(`${nyEv}-T57`, nyEv, 0.36, 0.35, { strike_type: 'less', cap_strike: 57, ...nyR });
-  const ch58 = mk(`${chEv}-B58.5`, chEv, 0.40, 0.38, { strike_type: 'between', floor_strike: 58, cap_strike: 59, ...chR }); mk(`${chEv}-B60.5`, chEv, 0.40, 0.38, { strike_type: 'between', floor_strike: 60, cap_strike: 61, ...chR }); mk(`${chEv}-T61`, chEv, 0.10, 0.08, { strike_type: 'greater', floor_strike: 61, ...chR });
+  const ny64 = mk(`${nyEv}-T64`, nyEv, 0.12, 0.11, { strike_type: 'greater', floor_strike: 64, ...nyR }); mk(`${nyEv}-B58.5`, nyEv, 0.27, 0.26, { strike_type: 'between', floor_strike: 58, cap_strike: 59, ...nyR }); mk(`${nyEv}-T57`, nyEv, 0.36, 0.35, { strike_type: 'less', cap_strike: 57, ...nyR });
+  const ch58 = mk(`${chEv}-B58.5`, chEv, 0.74, 0.72, { strike_type: 'between', floor_strike: 58, cap_strike: 59, ...chR }); mk(`${chEv}-B60.5`, chEv, 0.20, 0.18, { strike_type: 'between', floor_strike: 60, cap_strike: 61, ...chR }); mk(`${chEv}-T61`, chEv, 0.10, 0.08, { strike_type: 'greater', floor_strike: 61, ...chR });
 
   console.log('\n2. Sports: sportsbook line before the game, live win % late in the game, injury news blocks a bet, no news = no bet');
   const t0 = Date.now(), etc = ms => code(dateOf('America/New_York', ms));
@@ -75,10 +75,11 @@ const game = (id, state, startMs, home, away, more = {}) => ({ id, date: iso(sta
   let m0 = msgs().length;
   await send('/_other'); await until(() => /PRACTICE BETS/.test(since(m0)), 15000);
   const bet = since(m0);
-  ok(/🌡️ NYC high · \d\d-\d\d · NO on 65°\+ @ 81¢ · model \d+% · NWS high 58°F \(±\d\.\d°F\) · ⚠️ NWS: Winter Weather Advisory · ✔️ checked twice/.test(bet), 'NYC forecast rule: NWS says 58°F → NO on 65°+ at 81¢, the NWS alert shown (and widening the range)', bet);
-  ok(/🌡️ Chicago high · \d\d-\d\d · YES on 58–59° @ 40¢ · model \d+% · high so far 59°F, still to come ≤50°F \(±1\.5°F\) · ✔️ checked twice/.test(bet), 'late-day rule: observed high 59°F, cooling → YES 58–59° at 40¢', bet);
+  ok(/🌡️ NYC high · \d\d-\d\d · NO on 65°\+ @ 89¢ · model \d+% · NWS high 58°F \(±\d\.\d°F\) · ⚠️ NWS: Winter Weather Advisory · ✔️ checked twice/.test(bet), 'NYC forecast rule: NWS says 58°F → NO on 65°+ at 89¢, the NWS alert shown (and widening the range)', bet);
+  ok(/🌡️ Chicago high · \d\d-\d\d · YES on 58–59° @ 74¢ · model \d+% · high so far 59°F, still to come ≤50°F \(±1\.5°F\) · ✔️ checked twice/.test(bet), 'late-day rule: observed high 59°F, cooling → YES 58–59° at 74¢', bet);
   ok(/🏈 NFL · Lions vs Bears · Detroit @ 56¢ · sportsbooks 64% \(DraftKings\) · 📰 no injury news in 3 h/.test(bet), 'pre-game: sportsbooks 64% vs Kalshi 56¢ → Detroit (today\'s game, not the old one)', bet);
   ok(/🏈 NFL · Chiefs vs Broncos · Kansas City @ 86¢ · Chiefs leads 24–17, 3 min left · ESPN win 93%/.test(bet), 'late game: Chiefs up 7 with 3 min left, ESPN 93% vs 86¢', bet);
+  ok(!/B60\.5|60–61°|T61|62°\+/.test(bet), 'the model never bets far from the market price (max 15¢ apart)', bet);
   ok(!/Knicks|New York @/.test(bet) && !/Bruins|Boston @/.test(bet), 'fresh "ruled out" news blocks the Knicks bet; NHL news down → no Bruins bet (no news check, no bet)', bet);
   ok(/Paper only — real money starts once practice makes \+\$10/.test(bet) && W.orders.length === o0, 'practice only: no real orders', W.orders.slice(o0).map(o => o.ticker).join());
   m0 = msgs().length; await send('/_other'); await wait(2500);
@@ -103,10 +104,10 @@ const game = (id, state, startMs, home, away, more = {}) => ({ id, date: iso(sta
     g2: { header: { competitions: [{ competitors: [{ team: { abbreviation: 'KC' }, score: '24', winner: true }, { team: { abbreviation: 'DEN' }, score: '17', winner: false }] }] } } };
   m0 = msgs().length; await send('/_other'); await until(() => /PRACTICE RESULTS/.test(since(m0)), 15000);
   const res = since(m0);
-  ok(/✅ 🌡️ NYC high · \d\d-\d\d · NO on 65°\+ @ 81¢ → \+\$0\.17 · ✔️ NWS readings high 57°F/.test(res) && /✅ 🌡️ Chicago high · \d\d-\d\d · YES on 58–59° @ 40¢ → \+\$0\.58 · ✔️ NWS readings high 59°F/.test(res), 'weather graded (+$0.17, +$0.58) and confirmed by NWS readings', res);
+  ok(/✅ 🌡️ NYC high · \d\d-\d\d · NO on 65°\+ @ 89¢ → \+\$0\.10 · ✔️ NWS readings high 57°F/.test(res) && /✅ 🌡️ Chicago high · \d\d-\d\d · YES on 58–59° @ 74¢ → \+\$0\.24 · ✔️ NWS readings high 59°F/.test(res), 'weather graded (+$0.10, +$0.24) and confirmed by NWS readings', res);
   ok(/✅ 🏈 NFL · Lions vs Bears · Detroit @ 56¢ → \+\$0\.42 · ✔️ ESPN final DET 27–CHI 20/.test(res), 'Detroit win graded and confirmed by ESPN\'s final', res);
   ok(/❌ 🏈 NFL · Chiefs vs Broncos · Kansas City @ 86¢ → −\$0\.87 · ⚠️ ESPN final KC 24–DEN 17 disagrees with Kalshi — flagged/.test(res), 'a Kalshi result that disagrees with ESPN is flagged', res);
-  ok(/weather · forecast vs price: 1 trades · 1W·0L · \+\$0\.17/.test(res) && /sports · late-game leader \(live win %\): 1 trades · 0W·1L · −\$0\.87/.test(res) && /🎯 Practice total \+\$0\.30 — real money at \+\$10/.test(res), 'each rule keeps its own record; practice total +$0.30', res);
+  ok(/weather · forecast vs price: 1 trades · 1W·0L · \+\$0\.10/.test(res) && /sports · late-game leader \(live win %\): 1 trades · 0W·1L · −\$0\.87/.test(res) && /🎯 Practice total −\$0\.11 — real money at \+\$10/.test(res), 'each rule keeps its own record; practice total −$0.11', res);
   await until(() => (pinned().OT || {}).r && pinned().OT.r.wxf.n === 1);
   const P = pinned().OT; ok(P && P.r.wxf.n === 1 && P.r.wxl.n === 1 && P.r.spp.n === 1 && P.r.spl.n === 1 && !(P.p || []).some(x => [ny64, ch58, det, kc].some(m => m.ticker === x[1])), 'records saved in the pinned settings (survive restarts); graded bets leave the open list', JSON.stringify(P));
 
