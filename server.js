@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const zlib = require('zlib');
 const research = require('./research');
 const news = require('./news');
+const other = require('./other');
 
 const env = process.env;
 const KEY_ID = env.KALSHI_KEY_ID || '';
@@ -63,6 +64,7 @@ const CFG = {
   KELLY: env.BOT_TEST === '1' ? 0 : 0.5,
   PAPER: 0,          // paper trading: score every trade the bot would make, spend nothing, until the record proves a profit
   QUIET: 1, // Telegram: 1 = only what matters (news only when it pauses trading, window recap only when the main strategy acted); 0 = everything
+  OTHER: 1, OT_LIVE: 1, OT_GOAL: 10, // weather + sports practice bets (Brad 11/26 8:30 PM: "place bets on sports, crypto, weather ASWELL", chose practice first; 8:43 PM: "Profit 10$ then go to REAL FUNDS")
   LATE_MIN: 0.60, LATE_AM: 1, // real 15-min money skips leaders under 60¢ and US mornings (6–10 AM CT on US weekdays) — 11/24–26 real record: −4.7¢ and −10.8¢/contract there; paper tests still take them
   LATE: 1, LATE_MAX: 0.97, LATE_LIVE: 0, LATE_STOP: 5, LATE_PER: 15, LATE_GRACE: 0.01, // LATE_LIVE: real-money 12th-minute strategy (all coins), 1 contract per coin per LATE_PER $ of account; turns itself off after LATE_STOP $ lost
   // Brad's test: at the 12th minute of each 15-min market (and 12 min before each hourly/daily close), buy whichever side is winning
@@ -116,6 +118,9 @@ const SETTINGS = {
   latestop: { key: 'LATE_STOP', desc: 'real 12th-minute strategy turns itself off after losing this many $ in total', min: 0.5, max: 10000 },
   latemin:  { key: 'LATE_MIN', desc: 'real 15-min buys skip a leader priced under this (a coin flip plus the biggest fee)', min: 0.01, max: 0.97 },
   lateam:   { key: 'LATE_AM', desc: 'real 15-min buys sit out US mornings, 6–10 AM CT on US weekdays (data releases and the stock open flip late leaders): 1 on, 0 off', min: 0, max: 1 },
+  other:    { key: 'OTHER', desc: 'weather + sports practice bets (paper; NWS forecasts/observations/alerts, sportsbook lines, live win %, injury news): 1 on, 0 off', min: 0, max: 1 },
+  otlive:   { key: 'OT_LIVE', desc: 'real money on weather/sports once practice is up otgoal $, for each rule that is itself in profit: 1 on, 0 off', min: 0, max: 1 },
+  otgoal:   { key: 'OT_GOAL', desc: 'weather/sports practice profit ($) needed before real money', min: 1, max: 100000 },
   latemax:  { key: 'LATE_MAX', desc: 'highest price the buy-the-winner tests will pay for the winning side', min: 0.5, max: 0.99 },
   samedir:  { key: 'MAX_SAME_DIR', desc: 'max bets on the same direction (up/down) closing at the same time, across coins', min: 1, max: 50 },
   reservescale: { key: 'RESERVE_SCALE', desc: 'reserve shrinks with a small account (1 = on: min of $reserve and 10%)', min: 0, max: 1 },
@@ -134,7 +139,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 18; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); // stories already paused for survive restarts
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 18; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); blob.OT = OT.blob(); // stories already paused for survive restarts; weather/sports practice records
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -147,6 +152,7 @@ async function saveSettingsNow() {
   // 11/24: anchors + live record pushed it over again — keep trimming history (never settings, live record, stop flag, verdicts or anchors)
   if (text.length > 4090) { blob.NPS = (blob.NPS || []).slice(-3).map(x => { const t = news.storyTags(x.title), v = [...new Set([...(x.v || []), ...(t.v || [])])]; return { title: String(x.title).slice(0, 60), at: x.at, ...(x.c || t.c ? { c: 1 } : {}), ...(v.length ? { v } : {}) }; }); blob.SC = { ...S.sc, hist: (S.sc.hist || []).slice(-30) }; blob.PAPERS = { ...blob.PAPERS, late: lateBlob(5) }; text = zip(); }
   if (text.length > 4090) { blob.LANES = Object.fromEntries(Object.entries(S.lanes || {}).map(([k, v]) => [k, { ...v, r: (v.r || []).slice(-6) }])); blob.PAPERS = { ...blob.PAPERS, r: (S.paper.r || []).slice(-50) }; text = zip(); }
+  if (text.length > 4090 && blob.OT && blob.OT.p) { blob.OT = OT.blob(false); text = zip(); log('SETTINGS: open weather/sports practice bets kept in memory only (no room)'); } // records stay; only the open paper bets drop
   if (text.length > 4090) { delete blob.LRN; blob.SC = { ...S.sc, hist: [] }; text = zip(); } // research results are rebuilt by the next research run
   if (text.length > 4090) { if (Date.now() - (S.bigWarn || 0) > 3600e3) { S.bigWarn = Date.now(); log('SETTINGS TOO BIG', text.length, 'chars — not saved'); say('⚠️ Settings too big to save — tell Claude.').catch(() => {}); } return; }
   if (pinnedId) { const r = await tg('editMessageText', { chat_id: OWNER, message_id: pinnedId, text }); if (r.ok || /not modified/.test(r.error || '')) return; }
@@ -188,6 +194,7 @@ async function loadSettings() {
     if (blob.SC && typeof blob.SC === 'object') S.sc = { ...S.sc, ...blob.SC, ev: blob.SC.ev || {} };
     if (blob.SETL > 0) S.setlTs = blob.SETL;
     if (blob.LRN && typeof blob.LRN === 'object') S.learn = blob.LRN;
+    if (blob.OT && typeof blob.OT === 'object') OT.load(blob.OT);
     if (blob.LANES && typeof blob.LANES === 'object') S.lanes = blob.LANES;
     if (blob.CALFIT && typeof blob.CALFIT === "object") S.cal = blob.CALFIT;
     if (blob.LED && typeof blob.LED.spent === 'number') S.led = { ...newLed(blob.LED.day), ...blob.LED };
@@ -790,7 +797,7 @@ async function manageBids(latest, fast) {
 // the market later offers at or below our bid — i.e. only when a real resting bid would have been hit,
 // including the bad fills when price moves against us. Graded against Kalshi's real settlement.
 const paperRec = () => { const r = S.paper.r || [], n = r.length, sum = r.reduce((a, x) => a + x, 0), w = r.filter(x => x > 0).length; return { n, sum, w, avg: n ? sum / n : 0 }; };
-const paperText = () => paperTextMain() + (CFG.LATE === 1 || LATE_VARIANTS.some(x => lateRec(x.k).n) ? `\n${lateLines()}` : '');
+const paperText = () => paperTextMain() + (CFG.LATE === 1 || LATE_VARIANTS.some(x => lateRec(x.k).n) ? `\n${lateLines()}` : '') + `\n${OT.lines()}`;
 const paperTextMain = () => { const { n, sum, w, avg } = paperRec(), open = (S.paper.pos || []).length, bids = Object.keys(S.paper.bids || {}).length;
   return `📄 PAPER ${CFG.PAPER === 1 ? 'TRADING ON (no real money)' : 'record'}\n🧾 ${n} graded · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢ per contract)${S.paper.old ? `\n🗂 Before the 40¢ rule: ${S.paper.old.n} trades ${S.paper.old.sum >= 0 ? '+' : '−'}${money(Math.abs(S.paper.old.sum))}` : ''}\n⏳ ${open} open · ${bids} bids waiting\n🎯 Goes live after ${CFG.PAPER_PROVE_N}+ trades averaging +${Math.round(CFG.PAPER_PROVE_EDGE * 100)}¢ or better${n ? ` — now ${Math.max(0, CFG.PAPER_PROVE_N - n)} to go` : ''}`; };
 function paperOpen(o) { S.paper.pos = (S.paper.pos || []).concat([o]).slice(-60); if (S.win[o.ev]) S.win[o.ev].traded = { side: o.side, px: o.px, n: 1, paper: true }; }
@@ -861,7 +868,7 @@ function lateLiveSkip(m, px) {
 }
 // how many contracts a real 12th-minute order may be: 1 per LATE_PER $ of the money (× mult), capped so open bets (and resting late bids) stay under MAX_OPEN_PCT and the reserve is kept
 async function lateCount(lim, mult, per) {
-  const L = lateState(), LV = L.live, a = await account(true), open = LV.pos.reduce((x, o) => x + o.cost, 0) + Object.values(L.lbids || {}).reduce((x, b) => x + Math.max(0, b.n - b.filled) * (b.q + feeTotal(1, b.q)), 0), money0 = a.cash + open;
+  const L = lateState(), LV = L.live, a = await account(true), open = LV.pos.reduce((x, o) => x + o.cost, 0) + Object.values(L.lbids || {}).reduce((x, b) => x + Math.max(0, b.n - b.filled) * (b.q + feeTotal(1, b.q)), 0) + OT.liveOpen(), money0 = a.cash + open;
   let count = Math.max(1, Math.floor(money0 / per)) * mult; // the room check below still caps it at 60% of the money in open bets
   const room = Math.min(CFG.MAX_OPEN_PCT * money0 - open, a.cash - Math.max(resv(a), 0.02));
   while (count > 0 && count * lim + feeTotal(count, lim) > room) count--;
@@ -903,6 +910,23 @@ async function lateLive(m, side, px, name = '12th-minute', { mult = 1, per = CFG
   await saveSettings().catch(() => {});
   S.buyBuf = (S.buyBuf || []).concat([{ name, cost: r.total, cash: a.cash - r.total, line: `${side === 'yes' ? '⬆️' : '⬇️'} ${label(m.ticker).replace(/ ≥ \$[\d,.]+/, '')} · ${r.filled} ${side.toUpperCase()} @ ${cents(r.px)} = ${money(r.total)} · win +${money(r.filled - r.total)}` }]); // sent as one message after the scan (flushBuys)
 }
+// weather + sports (other.js): practice bets; a rule that proves itself buys with real money here — same size, 60% cap and reserve as the crypto buys
+async function otherLive(m, side, px, name) {
+  const lim = Math.min(0.97, Math.round((px + CFG.LATE_GRACE) * 100) / 100);
+  const { count, room } = await lateCount(lim, 1, CFG.LATE_PER);
+  if (count < 1) { log('OTHER LIVE skip', m.ticker, 'room', room.toFixed(2)); return null; }
+  let q = null; try { q = await withLiveQuote(m); } catch (e) { log('OTHER LIVE recheck failed', m.ticker, e.message); return null; }
+  const ask = side === 'yes' ? d(q, 'yes_ask') : d(q, 'no_ask');
+  if (!(ask > 0) || ask > lim || ask < px - 0.05) { log('OTHER LIVE skip', m.ticker, side, 'ask now', ask, 'quoted', px); return null; } // the price moved: the practice edge is gone
+  const r = await placeBuy({ ticker: m.ticker, side, count, price: lim, auto: true, fund: room });
+  if (!(r.filled > 0)) { log('OTHER LIVE not filled', m.ticker, side, lim); return null; }
+  log('OTHER LIVE BUY', m.ticker, side, r.filled, r.px, r.total);
+  try { const ps = await kalshi('GET', '/portfolio/positions?count_filter=position&limit=1000'), p = (ps.market_positions || []).find(x => x.ticker === m.ticker), held = p ? Math.abs(cnt(p, 'position')) : 0; // after the buy: Kalshi must show the position
+    if (held + 1e-9 < r.filled) { log('OTHER LIVE VERIFY mismatch', m.ticker, 'filled', r.filled, 'Kalshi shows', held); say(`⚠️ Check: bought ${r.filled} of ${m.ticker} but Kalshi shows ${held} — flagged.`).catch(() => {}); } else log('OTHER LIVE VERIFIED', m.ticker, held); } catch (e) { log('OTHER LIVE verify failed', m.ticker, e.message); }
+  S.buyBuf = (S.buyBuf || []).concat([{ name, cost: r.total, cash: (acctCache ? acctCache.v.cash : 0), line: `${side === 'yes' ? '⬆️' : '⬇️'} ${m.ticker} · ${r.filled} ${side.toUpperCase()} @ ${cents(r.px)} = ${money(r.total)} · win +${money(r.filled - r.total)}` }]);
+  return { n: r.filled, px: r.px, cost: Math.round(r.total * 100) / 100 };
+}
+const OT = other.create({ kalshi, req, log, say: t => say(t), feeTotal, money, cents, cfg: () => CFG, save: () => saveSettings().catch(() => {}), realBuy: otherLive, quote: m => withLiveQuote(m) });
 async function flushConds() { // coins paused/cleared in the same scan share one message (one ETH drop paused all 9 coins = 18 messages on 11/25)
   const b = S.condBuf || []; if (!b.length) return; S.condBuf = [];
   const by = {}; for (const x of b) { const k = x.on ? 'P' + x.why : 'C'; (by[k] = by[k] || []).push(x.coin); }
@@ -1623,6 +1647,8 @@ async function onUpdate(u) {
   if (t.startsWith('/lock')) { S.unlocked = false; S.manualLock = true; await saveSettings(); return say(`🔒 Confirm mode locked. /auto to allow auto-trading at +$${CFG.UNLOCK_PROFIT} again.`); }
   if (/^\/auto(@\w+)?$/.test(t)) { S.manualLock = false; await saveSettings(); return say(`Auto-trading will turn on at +$${CFG.UNLOCK_PROFIT} profit.`); }
   if (env.BOT_TEST === '1' && t === '/_fasttick') { await tick(true); return; }
+  if (env.BOT_TEST === '1' && t === '/_other') { await OT.tick({ force: true }); await flushBuys().catch(() => {}); return; }
+  if (env.BOT_TEST === '1' && /^\/_otherprove \w+$/.test(t)) { const R = OT.state.r[t.split(' ')[1]]; Object.assign(R, { n: 60, w: 45, sum: 10.5, b: [25, 4, 10, 1.5] }); return; } // tests: a rule with 60 trades, +$10.50
   if (env.BOT_TEST === '1' && t === '/_news') { await pollNews(); return; }
   if (env.BOT_TEST === '1' && t === '/_clearnewspause') { S.newsPauseUntil = 0; return; }
   if (env.BOT_TEST === '1' && t === '/_clearlearn') { S.learn = {}; return; }
@@ -1916,6 +1942,7 @@ async function pollNews() {
 if (env.BOT_TEST !== '1') {
   setTimeout(runResearch, 3 * 60e3); setInterval(runResearch, 6 * 3600e3);
   setTimeout(pollNews, 20e3); setInterval(pollNews, 2 * 60e3);
+  let otBusy = false; setInterval(async () => { if (otBusy) return; otBusy = true; try { await OT.tick(); await flushBuys(); } catch (e) { log('OTHER failed', e.message); } finally { otBusy = false; } }, 60e3); // weather every 10 min, sports every minute
 }
 // keep the free Render instance awake
 if (PUBLIC_URL) setInterval(() => fetch(PUBLIC_URL + '/').catch(() => {}), 4 * 60e3);

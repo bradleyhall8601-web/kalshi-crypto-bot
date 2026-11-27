@@ -83,6 +83,23 @@ global.fetch = async (url, o = {}) => {
   if (u.includes('api.kraken.com')) { if (W.down.kraken) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ result: { X: { c: [String(W[coin] * sh * (W.krakenSkew || 1))] } } }); }
   if (u.includes('api.gemini.com')) { if (W.down.gemini) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ last: String(W[coin] * sh * (W.geminiSkew || 1)), volume: { timestamp: W.now() - (W.stale.gemini ? 120e3 : 0) } }); }
   if (u.includes('bitstamp.net')) { if (W.down.bitstamp) return J({}, 500); const coin = coinOf(u); const sh = W.shock && W.shock.coin === coin ? 1 + W.shock.pct : 1; return J({ last: String(W[coin] * sh * (W.bitstampSkew || 1)), timestamp: String(Math.floor(W.now() / 1000) - (W.stale.bitstamp ? 120 : 1)) }); }
+  // ---- NWS + ESPN (weather/sports practice bets) ----
+  if (u.includes('api.weather.gov')) {
+    const X = W.nws || {}, pth = new URL(u).pathname, sts = X.stations || {}; let mm;
+    if ((mm = pth.match(/^\/stations\/([A-Z0-9]+)$/))) { const s = sts[mm[1]]; return s ? J({ geometry: { coordinates: [s.lon, s.lat] } }) : J({ title: 'Not Found' }, 404); }
+    if ((mm = pth.match(/^\/points\/([-\d.]+),([-\d.]+)$/))) { const id = Object.keys(sts).find(k => Math.abs(sts[k].lat - Number(mm[1])) < 1e-3 && Math.abs(sts[k].lon - Number(mm[2])) < 1e-3); return id ? J({ properties: { forecastGridData: `https://api.weather.gov/gridpoints/TST/${id}`, timeZone: sts[id].tz } }) : J({}, 404); }
+    if ((mm = pth.match(/^\/gridpoints\/TST\/([A-Z0-9]+)$/))) { const s = sts[mm[1]] || {}; return J({ properties: { updateTime: new Date().toISOString(), maxTemperature: { uom: 'wmoUnit:degC', values: s.max || [] }, temperature: { uom: 'wmoUnit:degC', values: s.temp || [] } } }); }
+    if ((mm = pth.match(/^\/stations\/([A-Z0-9]+)\/observations$/))) return J({ features: ((sts[mm[1]] || {}).obs || []).map(o => ({ properties: { timestamp: o.t, temperature: { unitCode: 'wmoUnit:degC', value: o.c } } })) });
+    if (pth.startsWith('/alerts/active')) { const q = new URL(u).searchParams.get('point') || '', id = Object.keys(sts).find(k => q.startsWith(sts[k].lat.toFixed(4))); return J({ features: (((sts[id] || {}).alerts) || []).map(e => ({ properties: { event: e } })) }); }
+    return J({}, 404);
+  }
+  if (u.includes('site.api.espn.com')) {
+    const X = W.espn || {}, pth = new URL(u).pathname, lg = (pth.match(/sports\/([^/]+\/[^/]+)\//) || [])[1], L = X[lg] || {};
+    if (pth.endsWith('/scoreboard')) return J({ events: (typeof L.events === 'function' ? L.events() : L.events) || [] });
+    if (pth.endsWith('/news')) return L.newsDown ? J({ error: 'down' }, 500) : J({ articles: L.news || [] });
+    if (pth.endsWith('/summary')) { const id = new URL(u).searchParams.get('event'); return J({ winprobability: L.wp || [], ...((L.summ || {})[id] || {}) }); }
+    return J({}, 404);
+  }
   // ---- Kalshi ----
   if (u.includes('kalshi')) {
     const path = new URL(u).pathname, h = o.headers || {};
