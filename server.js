@@ -68,7 +68,7 @@ const CFG = {
   LATE_MIN: 0.60, LATE_AM: 1, // real 15-min money skips leaders under 60¢ and US mornings (6–10 AM CT on US weekdays) — 11/24–26 real record: −4.7¢ and −10.8¢/contract there; paper tests still take them
   LATE: 1, LATE_MAX: 0.97, LATE_LIVE: 0, LATE_STOP: 5, LATE_PER: 15, LATE_GRACE: 0.01, // LATE_LIVE: real-money 12th-minute strategy (all coins), 1 contract per coin per LATE_PER $ of account; turns itself off after LATE_STOP $ lost
   // Brad's test: at the 12th minute of each 15-min market (and 12 min before each hourly/daily close), buy whichever side is winning
-  PAPER_PROVE_N: 50, PAPER_PROVE_EDGE: 0.02, // go live after 50+ paper trades averaging +2¢ per contract after fees
+  PAPER_PROVE_N: 150, PAPER_PROVE_EDGE: 0.02, // go live after 150+ paper trades in all (and the last 50) averaging +2¢ per contract after fees (11/27: a rolling 50 swung −4.3¢ → +4.2¢ in two hours)
   MAX_SAME_DIR: env.BOT_TEST === '1' ? 50 : 2, // coins move together: at most 2 bets on the same direction (up/down) per closing time
   RESERVE_SCALE: env.BOT_TEST === '1' ? 0 : 1, // reserve = the smaller of $RESERVE and 10% of the account (min 25¢), so a small account can still trade // size by half-Kelly on the calibrated edge (capped by tradepct)            // self-calibration: shrink the model toward the market by how much its past disagreements came true          // self-learning: each market type (coin x 15-min/hourly/daily) tightens or benches itself from its own real results
   MAX_ALERTS_PER_RUN: 2, ALERT_TTL_MIN: 4, MAX_SLIPPAGE: 0.02,
@@ -139,7 +139,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 20; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); blob.OT = OT.blob(); // stories already paused for survive restarts; weather/sports practice records
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 21; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, tot: S.paper.tot, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); blob.OT = OT.blob(); // stories already paused for survive restarts; weather/sports practice records
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -172,14 +172,14 @@ async function loadSettings() {
     if (!(blob.v >= 10) && env.BOT_TEST !== '1') { CFG.TRADE_PCT = 0.06; CFG.DAILY_MIN_EQUITY = 50; CFG.MAKER = 1; CFG.KELLY = 0.5; setTimeout(saveSettings, 2000); } // grow-and-last sizing + limit bids
     if (blob.REST && typeof blob.REST === 'object') S.rest = blob.REST;
     if (Array.isArray(blob.NPS)) S.pauseStories = blob.NPS.filter(x => x && x.title && Date.now() - x.at < news.VENUE_MS);
-    if (blob.PAPERS && typeof blob.PAPERS === 'object') S.paper = { r: blob.PAPERS.r || [], pos: blob.PAPERS.pos || [], bids: blob.PAPERS.bids || {}, since: blob.PAPERS.since || Date.now(), old: blob.PAPERS.old || null, late: blob.PAPERS.late || undefined };
+    if (blob.PAPERS && typeof blob.PAPERS === 'object') S.paper = { r: blob.PAPERS.r || [], tot: blob.PAPERS.tot || null, pos: blob.PAPERS.pos || [], bids: blob.PAPERS.bids || {}, since: blob.PAPERS.since || Date.now(), old: blob.PAPERS.old || null, late: blob.PAPERS.late || undefined };
     if (!(blob.v >= 11) && env.BOT_TEST !== '1') { CFG.PAPER = 1; S.paper.since = Date.now(); setTimeout(() => { saveSettings(); say('📄 PAPER TRADING ON — no real money is spent from now on. The bot keeps scanning every market and grades every trade it would have made against Kalshi\'s real results. It switches back to real money by itself after 50+ paper trades averaging +2¢ or better per contract. /paper shows the record.'); }, 3000); }
     if (!(blob.v >= 16) && env.BOT_TEST !== '1' && blob.v >= 15) { CFG.LATE_LIVE = 1; CFG.LATE_STOP = 10000; const LV = lateState().live; delete LV.stopped; LV.base = LV.sum; setTimeout(() => { saveSettings(); say('💵 REAL MONEY BACK ON — 12th-minute strategy, no loss limit (your call, 11/24 8:40 PM).\n🛡 Still never more than 60% of the money in open bets at once.\n⚠️ With no loss limit it can lose the whole balance. /set latelive 0 stops it anytime; /set latestop 5 puts a limit back.'); }, 4500); } // Brad 11/24 8:40 PM: "Take the loss limit off… keep it live"
     if (!(blob.v >= 15) && env.BOT_TEST !== '1') { CFG.LATE_LIVE = 1; setTimeout(() => { saveSettings(); say(`💵 REAL MONEY ON — 12th-minute strategy (your go, 11/24)\n⏰ Every 15-min market, all 9 coins: at the 12th minute it buys whichever side is winning, with real money.\n📏 Size: 1 contract per coin for every ${money(CFG.LATE_PER)} in the account — grows as the account grows.\n🛡 Never more than ${Math.round(CFG.MAX_OPEN_PCT * 100)}% of the money in open bets at once; turns itself off if it loses ${money(CFG.LATE_STOP)} in total.\n📄 Main strategy stays paper. /paper shows both. /set latelive 0 stops it anytime.`); }, 4500); } // Brad 11/24: go full blown with the 12-minute version
     if (!(blob.v >= 12) && env.BOT_TEST !== '1') { // no more long shots; the go-live proof restarts so it measures only the new rule
       CFG.MIN_PRICE = Math.max(CFG.MIN_PRICE, 0.40);
       const r = S.paper.r || []; S.paper.old = { n: r.length, sum: Math.round(r.reduce((a, x) => a + x, 0) * 100) / 100, w: r.filter(x => x > 0).length };
-      S.paper.r = []; S.paper.since = Date.now();
+      S.paper.r = []; S.paper.tot = null; S.paper.since = Date.now();
       S.paper.pos = (S.paper.pos || []).filter(o => o.px >= CFG.MIN_PRICE); for (const [k, b] of Object.entries(S.paper.bids || {})) if (b.q < CFG.MIN_PRICE) delete S.paper.bids[k];
       setTimeout(() => { saveSettings(); say(`🎯 NEW RULE: no more long shots — the bot only buys contracts priced 40¢–85¢.\n📊 Why: in ${S.paper.old.n} paper trades, buys under 40¢ went 2 wins / 14 losses (−20¢ each), while 40¢+ buys made money.\n📄 Paper proof restarts from 0 to test the new rule honestly (old record: ${S.paper.old.n} trades ${S.paper.old.sum >= 0 ? '+' : '−'}$${Math.abs(S.paper.old.sum).toFixed(2)}). Still goes live after 50+ trades averaging +2¢.`); }, 3500);
     }
@@ -200,6 +200,7 @@ async function loadSettings() {
     if (blob.CALFIT && typeof blob.CALFIT === "object") S.cal = blob.CALFIT;
     if (blob.LED && typeof blob.LED.spent === 'number') S.led = { ...newLed(blob.LED.day), ...blob.LED };
     if (!(blob.v >= 17) && env.BOT_TEST !== '1' && S.led && String(S.led.day) === '1795586400' && S.led.w >= 4) { S.led.w -= 4; S.led.pnl = Math.round((S.led.pnl - 1.09) * 100) / 100; log('LED FIX', 'removed the 12:45 PM CT results counted twice on 11/25 (4W, +$1.09)'); setTimeout(saveSettings, 3000); } // v17: one-time correction of today's tally
+    if (!(blob.v >= 21) && env.BOT_TEST !== '1' && blob.v >= 20) { CFG.PAPER = 1; setTimeout(() => { saveSettings(); say(`📄 MODEL BIDS BACK TO PRACTICE (your call, 11/27 9:10 AM)\n💵 Real money stays on the 12th-minute strategy only.\n🎯 The model goes real again only after 150+ practice trades averaging +2¢ or better (and its last 50 too) — a 50-trade streak was mostly luck.\n🧾 Its open real bids are cancelled; anything already bought settles as normal.`); }, 4500); }
     if (!(blob.v >= 20) && env.BOT_TEST !== '1' && S.led && String(S.led.day) === '1795759200') { const o = { n: 49, nAuto: 49, w: 49, l: 6, pnl: 2.17, fees: 0.56, best: 0.69, worst: -1.85 }; // v20: the 4:27 AM CT false day roll (11/27) wiped midnight–4:27 AM; put it back
       for (const k of ['n', 'nAuto', 'w', 'l']) S.led[k] = (S.led[k] || 0) + o[k]; S.led.pnl = Math.round((S.led.pnl + o.pnl) * 100) / 100; S.led.fees += o.fees; S.led.best = Math.max(S.led.best, o.best); S.led.worst = Math.min(S.led.worst, o.worst);
       log('LED FIX', 'added back midnight–4:27 AM CT 11/27 (49 trades, 49W·6L, +$2.17) lost to a false day roll'); setTimeout(saveSettings, 3000); }
@@ -803,7 +804,9 @@ async function manageBids(latest, fast) {
 // Same decisions as real trading, no money. Taker picks fill at the ask (+taker fee). Limit bids fill only when
 // the market later offers at or below our bid — i.e. only when a real resting bid would have been hit,
 // including the bad fills when price moves against us. Graded against Kalshi's real settlement.
-const paperRec = () => { const r = S.paper.r || [], n = r.length, sum = r.reduce((a, x) => a + x, 0), w = r.filter(x => x > 0).length; return { n, sum, w, avg: n ? sum / n : 0 }; };
+const paperTot = () => { const r = S.paper.r || []; if (!S.paper.tot) S.paper.tot = { n: r.length, sum: Math.round(r.reduce((a, x) => a + x, 0) * 100) / 100, w: r.filter(x => x > 0).length }; return S.paper.tot; }; // all paper trades since the last reset (the saved list keeps only the latest ~50)
+const paperRec = () => { const t = paperTot(); return { n: t.n, sum: t.sum, w: t.w, avg: t.n ? t.sum / t.n : 0 }; };
+const paperRecent = (k = 50) => { const r = (S.paper.r || []).slice(-k); return r.length ? r.reduce((a, x) => a + x, 0) / r.length : 0; };
 const paperText = () => paperTextMain() + (CFG.LATE === 1 || LATE_VARIANTS.some(x => lateRec(x.k).n) ? `\n${lateLines()}` : '') + `\n${OT.lines()}`;
 const paperTextMain = () => { const { n, sum, w, avg } = paperRec(), open = (S.paper.pos || []).length, bids = Object.keys(S.paper.bids || {}).length;
   return `📄 PAPER ${CFG.PAPER === 1 ? 'TRADING ON (no real money)' : 'record'}\n🧾 ${n} graded · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢ per contract)${S.paper.old ? `\n🗂 Before the 40¢ rule: ${S.paper.old.n} trades ${S.paper.old.sum >= 0 ? '+' : '−'}${money(Math.abs(S.paper.old.sum))}` : ''}\n⏳ ${open} open · ${bids} bids waiting\n🎯 Goes live after ${CFG.PAPER_PROVE_N}+ trades averaging +${Math.round(CFG.PAPER_PROVE_EDGE * 100)}¢ or better${n ? ` — now ${Math.max(0, CFG.PAPER_PROVE_N - n)} to go` : ''}`; };
@@ -888,6 +891,7 @@ async function realStats(sinceTs) {
   const hb = r => r.h < 6 ? '12–6 AM' : r.h < 10 ? '6–10 AM' : r.h < 14 ? '10 AM–2 PM' : r.h < 18 ? '2–6 PM' : '6 PM–12 AM';
   return { rows, tot: g(() => 'all').all || { n: 0, c: 0, w: 0, pl: 0 }, px: g(pb), coin: g(r => r.coin), hour: g(hb), size: g(r => r.n > 1 ? '2+ contracts' : '1 contract') };
 }
+if (env.BOT_TEST !== '1') setTimeout(() => realStats(Math.floor(Date.now() / 1000) - 7 * 86400).then(R => log('REALSTATS', JSON.stringify({ days: 7, tot: R.tot, px: R.px, coin: R.coin, hour: R.hour, size: R.size }))).catch(e => log('REALSTATS failed', e.message)), 90e3); // after each start: the real record by price/coin/time/size, for the checks
 function realStatsText(R, days) {
   const line = (k, a) => `${k}: ${a.n} · ${Math.round(a.w / a.n * 100)}% won · ${a.pl >= 0 ? '+' : '−'}${money(Math.abs(a.pl))} (${a.pl >= 0 ? '+' : ''}${(a.pl / a.c * 100).toFixed(1)}¢/contract)`;
   const sec = (title, o, order) => `${title}\n` + (order || Object.keys(o).sort((x, y) => o[y].pl - o[x].pl)).filter(k => o[k]).map(k => (o[k].pl >= 0 ? '🟢 ' : '🔴 ') + line(k, o[k])).join('\n');
@@ -909,6 +913,7 @@ async function lateLive(m, side, px, name = '12th-minute', { mult = 1, per = CFG
   if (CFG.LATE_LIVE !== 1 || LV.stopped || LV.pos.some(o => o.ev === m.event_ticker) || Object.values(lateState().lbids || {}).some(b => b.ev === m.event_ticker)) return;
   const lim = Math.max(px, Math.min(CFG.LATE_MAX, Math.round((px + CFG.LATE_GRACE) * 100) / 100)); // live: a cent of room so a 1¢ tick doesn't miss the fill (live 11/24: 3 of 5 missed)
   let { count, room, a, open } = await lateCount(lim, mult, per);
+  if ((a.held && a.held.has(m.event_ticker)) || restingFor(m.event_ticker)) { log('LATE LIVE skip', m.ticker, side, 'the account already holds or bids on this market (another strategy or a manual bet)'); return; } // never pay both sides of one market
   if (count < 1) { log('LATE LIVE skip', m.ticker, 'room', room.toFixed(2), 'cash', a.cash, 'open', open.toFixed(2)); return; }
   if (isFast(String(m.ticker).split('-')[0])) { // re-check the book right before the order: the account check takes ~1–2 s and a leader can collapse in between, and a buy limit has no floor
     // (live 11/26: DOGE quoted 64¢ → filled 56¢ at 12:00 PM CT, NEAR 69¢ → 53¢ at 2:30 PM CT; both lost)
@@ -969,7 +974,7 @@ async function flushBuys() { // all of a window's real buys in ONE Telegram mess
 }
 // what the filters see at the moment of a 12th-minute entry (bits: 1 model agrees, 2 calm market, 4 no fresh news)
 function lateNewsBusy(now = Date.now()) { // Brad 11/25: "pay attention to the news it's putting out, it can affect the market"
-  if (news.releaseWindow(now)) return 'just after a scheduled US data release';
+  if (env.BOT_TEST !== '1' && news.releaseWindow(now)) return 'just after a scheduled US data release'; // tests: real clock time must not change results
   const it = (S.newsLog || []).find(x => (x.level === 'macro' || x.level === 'critical') && now - (x.got || 0) < 15 * 60e3);
   if (it) return `fresh news: ${String(it.title).slice(0, 60)}`;
   if (S.newsPauseUntil && now >= S.newsPauseUntil && now - S.newsPauseUntil < 10 * 60e3) return 'news pause just ended';
@@ -1222,6 +1227,7 @@ async function paperGrade() {
     if (res !== 'yes' && res !== 'no') { if (Date.now() > o.c + 6 * 3600e3) S.paper.pos = S.paper.pos.filter(x => x !== o); continue; }
     const win = res === o.side ? 1 : 0, fee = o.kind === 'take' ? 0.07 * o.px * (1 - o.px) : 0;
     const pnl = Math.round((win - o.px - fee) * 100) / 100;
+    { const t = paperTot(); t.n++; t.sum = Math.round((t.sum + pnl) * 100) / 100; if (pnl > 0) t.w++; }
     S.paper.r = (S.paper.r || []).concat([pnl]).slice(-200); S.paper.pos = S.paper.pos.filter(x => x !== o);
     if (o.pb >= 0 && o.mk >= 0) { S.sc.hist = (S.sc.hist || []).concat([[o.pb, o.mk, win]]).slice(-200); calDirty = true; }
     await learnLane(laneOf(o.ev, new Date(o.c).toISOString()), pnl, o.px);
@@ -1230,8 +1236,8 @@ async function paperGrade() {
   if (!lines.length) return;
   const { n, sum, avg } = paperRec();
   await say(`📄 PAPER RESULTS\n${lines.join('\n')}\n📊 Record: ${n} trades ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract)`);
-  if (CFG.PAPER === 1 && n >= CFG.PAPER_PROVE_N && avg >= CFG.PAPER_PROVE_EDGE) {
-    CFG.PAPER = 0; await say(`✅ PAPER RECORD PROVEN: ${n} trades averaging +${(avg * 100).toFixed(1)}¢ per contract. Real trading is back ON (smallest sizes first). /set paper 1 to go back to practice.`);
+  if (CFG.PAPER === 1 && n >= CFG.PAPER_PROVE_N && avg >= CFG.PAPER_PROVE_EDGE && paperRecent() >= CFG.PAPER_PROVE_EDGE) {
+    CFG.PAPER = 0; await say(`✅ PAPER RECORD PROVEN: ${n} trades averaging +${(avg * 100).toFixed(1)}¢ per contract (last 50: +${(paperRecent() * 100).toFixed(1)}¢). Real trading is back ON (smallest sizes first). /set paper 1 to go back to practice.`);
   }
   await saveSettings().catch(() => {});
 }

@@ -22,7 +22,7 @@ const today = (() => { const p = Object.fromEntries(new Intl.DateTimeFormat('en-
 const ago = Date.now() - 10 * 60e3, tk = 'KXBTC15M-OLD1-00';
 W.markets[tk] = { ticker: tk, event_ticker: 'KXBTC15M-OLD1', status: 'settled', result: 'no', close_time: new Date(ago).toISOString(), keep: true };
 W.pinned = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify({ v: 11, PAPER: 1, MAKER: 1, AUTO_FAST: 1, AUTO_HOURLY: 1, ALWAYS_IN: 0, RESERVE: 1,
-  PAPERS: { r: Array.from({ length: 49 }, (_, i) => i % 2 ? 0.55 : -0.49), pos: [{ t: tk, ev: 'KXBTC15M-OLD1', side: 'no', px: 0.45, c: ago, p: 0.5, pb: 500, mk: 450, kind: 'bid' }], bids: {}, since: ago },
+  PAPERS: { r: Array.from({ length: 49 }, (_, i) => i % 2 ? 0.55 : -0.49), tot: { n: 149, sum: 4, w: 80 }, pos: [{ t: tk, ev: 'KXBTC15M-OLD1', side: 'no', px: 0.45, c: ago, p: 0.5, pb: 500, mk: 450, kind: 'bid' }], bids: {}, since: ago },
   LED: { day: today, spent: 0, fast: 0, autoPnl: 0, streak: 0, fastOff: false, auto: [], n: 0, nAuto: 0, w: 0, l: 0, pnl: 0, fees: 0, best: 0, worst: 0 }, SETL: Date.now() - 60e3,
   SC: { n: 0, wins: 0, sumP: 0, brier: 0, pnl: 0, open: [], ev: {} } });
 W.shards = { 0: 0.66, 2: 0 }; // tiny real wallet: paper must not care
@@ -55,7 +55,7 @@ W.shards = { 0: 0.66, 2: 0 }; // tiny real wallet: paper must not care
   console.log('\n3. Graded on real results; proven record switches real trading back on');
   await send('/scan'); await wait(5000);
   ok(msgs().some(m => /📄 PAPER RESULTS/.test(m) && /✅ BTC 15-min/.test(m) && /\+\$0\.55/.test(m)), 'paper result graded from Kalshi settlement', msgs().filter(m => /PAPER/.test(m)).join(' | '));
-  ok(msgs().some(m => /✅ PAPER RECORD PROVEN: 50 trades averaging \+3\.\d¢/.test(m)), '50 trades at +3¢ → goes live automatically');
+  ok(msgs().some(m => /✅ PAPER RECORD PROVEN: 150 trades averaging \+3\.\d¢ per contract \(last 50: \+3\.\d¢\)/.test(m)), '150 trades at +3¢ (last 50 too) → goes live automatically', msgs().filter(m => /PROVEN/.test(m)).join(' | '));
   await send('/status'); await wait(400);
   ok(!/Mode: 📄 PAPER/.test(last()), 'real mode after proof', last().split('\n')[1]);
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);
