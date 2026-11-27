@@ -873,6 +873,28 @@ function lateLiveSkip(m, px) {
   if (why) log('LATE LIVE skip', m.ticker, px, why);
   return why;
 }
+// Real 15-min results straight from Kalshi's settlements, split by price, coin, time of day and size: where the money is made and lost
+async function realStats(sinceTs) {
+  const st = await pageAll(`/portfolio/settlements?min_ts=${sinceTs}`, 'settlements'), rows = [];
+  for (const x of st) {
+    const tk = String(x.ticker || x.market_ticker || ''), m = tk.match(/^KX([A-Z]+)15M-/); if (!m) continue;
+    const yc = cnt(x, 'yes_count'), nc = cnt(x, 'no_count'), n = yc + nc; if (!(n > 0)) continue; // sold before the close: booked at the sale
+    const cost = (d(x, 'yes_total_cost') || 0) + (d(x, 'no_total_cost') || 0), pl = d(x, 'revenue') - cost - (d(x, 'fee_cost') || 0), t = Date.parse(x.settled_time || 0) || 0;
+    const h = +new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, hour: '2-digit', hourCycle: 'h23' }).format(new Date(t - 5 * 60000));
+    rows.push({ coin: m[1], n, px: cost / n, pl, t, h });
+  }
+  const g = (key) => { const o = {}; for (const r of rows) { const k = key(r); const a = o[k] = o[k] || { n: 0, c: 0, w: 0, pl: 0 }; a.n++; a.c += r.n; if (r.pl > 0) a.w++; a.pl += r.pl; } return o; };
+  const pb = r => r.px < 0.7 ? '60–69¢' : r.px < 0.8 ? '70–79¢' : r.px < 0.9 ? '80–89¢' : r.px < 0.95 ? '90–94¢' : '95¢+';
+  const hb = r => r.h < 6 ? '12–6 AM' : r.h < 10 ? '6–10 AM' : r.h < 14 ? '10 AM–2 PM' : r.h < 18 ? '2–6 PM' : '6 PM–12 AM';
+  return { rows, tot: g(() => 'all').all || { n: 0, c: 0, w: 0, pl: 0 }, px: g(pb), coin: g(r => r.coin), hour: g(hb), size: g(r => r.n > 1 ? '2+ contracts' : '1 contract') };
+}
+function realStatsText(R, days) {
+  const line = (k, a) => `${k}: ${a.n} · ${Math.round(a.w / a.n * 100)}% won · ${a.pl >= 0 ? '+' : '−'}${money(Math.abs(a.pl))} (${a.pl >= 0 ? '+' : ''}${(a.pl / a.c * 100).toFixed(1)}¢/contract)`;
+  const sec = (title, o, order) => `${title}\n` + (order || Object.keys(o).sort((x, y) => o[y].pl - o[x].pl)).filter(k => o[k]).map(k => (o[k].pl >= 0 ? '🟢 ' : '🔴 ') + line(k, o[k])).join('\n');
+  return `📊 REAL 15-MIN RESULTS · last ${days} days (from Kalshi)\n` + (R.tot.n ? line('All', R.tot) : 'no settled real trades') + '\n\n' +
+    sec('💲 By price', R.px, ['60–69¢', '70–79¢', '80–89¢', '90–94¢', '95¢+']) + '\n\n' + sec('🪙 By coin', R.coin) + '\n\n' +
+    sec('🕐 By time (CT)', R.hour, ['12–6 AM', '6–10 AM', '10 AM–2 PM', '2–6 PM', '6 PM–12 AM']) + '\n\n' + sec('📏 By size', R.size, ['1 contract', '2+ contracts']);
+}
 // how many contracts a real 12th-minute order may be: 1 per LATE_PER $ of the money (× mult), capped so open bets (and resting late bids) stay under MAX_OPEN_PCT and the reserve is kept
 async function lateCount(lim, mult, per) {
   const L = lateState(), LV = L.live, a = await account(true), open = LV.pos.reduce((x, o) => x + o.cost, 0) + Object.values(L.lbids || {}).reduce((x, b) => x + Math.max(0, b.n - b.filled) * (b.q + feeTotal(1, b.q)), 0) + OT.liveOpen(), money0 = a.cash + open;
@@ -1682,6 +1704,7 @@ async function onUpdate(u) {
     const ev = eventPause();
     return say(`📰 News watch (${S.newsSources || '…'} sources live)\n${ev ? `⏸ Paused: ${ev}` : '▶️ No event pause'}\n` + (S.newsLog.length ? S.newsLog.slice(0, 6).map(x => `• ${x.level === 'critical' ? '🚨' : x.level === 'macro' ? '🏛' : x.level.startsWith('critical') ? '⚠️' : x.level.startsWith('macro') ? '🏦' : '📊'} ${x.title.slice(0, 110)}`).join('\n') : 'No market-moving headlines since start.'));
   }
+  if (t.startsWith('/realstats')) { const days = Math.min(30, Math.max(1, parseInt(t.split(/\s+/)[1], 10) || 7)); try { const R = await realStats(Math.floor(Date.now() / 1000) - days * 86400); log('REALSTATS', JSON.stringify({ days, tot: R.tot, px: R.px, coin: R.coin, hour: R.hour, size: R.size })); return say(realStatsText(R, days)); } catch (e) { return say(`⚠️ /realstats failed: ${String(e.message).slice(0, 200)}`); } }
   if (t.startsWith('/report')) { try { await account(true); } catch (e) {} await rollDay(String(startOfTodayCT())); return say(dayReport(S.led, 'TODAY SO FAR')); }
   if (t.startsWith('/why')) {
     const st = S.stats, f5 = st.fast.filter(x => Date.now() - x < 5 * 60e3).length;
@@ -1712,7 +1735,7 @@ async function onUpdate(u) {
   if (t.startsWith('/paper')) return say(paperText());
   if (t.startsWith('/bids')) { const r = Object.values(S.rest || {}); return say(r.length ? `📋 Resting limit bids (${money(restingCost())} reserved):\n` + r.map(o => `• ${label(o.t)} ${o.side.toUpperCase()} ${o.n} @ ${cents(o.q)} · win chance ${Math.round(o.p * 100)}%${o.filled ? ` · ${o.filled} filled` : ''}`).join('\n') : `📋 No resting bids right now. Limit bids: ${CFG.MAKER === 1 ? 'ON' : 'OFF (/set maker 1)'}`); }
   if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins all  (or btc,eth,sol,…)');
-  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/news – market-moving headlines + pauses\n/research – what the self-test learned\n/coins – which coins & markets are live\n/learn – self-learning results per market\n/bids – resting limit bids\n/paper – practice-trading record\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol,xrp,doge,bnb,hype,near,zec (or all)');
+  if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/realstats [days] – real 15-min results by price, coin, time and size\n/news – market-moving headlines + pauses\n/research – what the self-test learned\n/coins – which coins & markets are live\n/learn – self-learning results per market\n/bids – resting limit bids\n/paper – practice-trading record\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol,xrp,doge,bnb,hype,near,zec (or all)');
   if (t.startsWith('/set')) { const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
   if (t.startsWith('/rollback')) return rollback();
   if (t.startsWith('/claude') || !t.startsWith('/')) {
