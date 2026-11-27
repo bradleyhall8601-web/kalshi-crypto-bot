@@ -139,7 +139,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 19; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); blob.OT = OT.blob(); // stories already paused for survive restarts; weather/sports practice records
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 20; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); blob.OT = OT.blob(); // stories already paused for survive restarts; weather/sports practice records
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -200,6 +200,9 @@ async function loadSettings() {
     if (blob.CALFIT && typeof blob.CALFIT === "object") S.cal = blob.CALFIT;
     if (blob.LED && typeof blob.LED.spent === 'number') S.led = { ...newLed(blob.LED.day), ...blob.LED };
     if (!(blob.v >= 17) && env.BOT_TEST !== '1' && S.led && String(S.led.day) === '1795586400' && S.led.w >= 4) { S.led.w -= 4; S.led.pnl = Math.round((S.led.pnl - 1.09) * 100) / 100; log('LED FIX', 'removed the 12:45 PM CT results counted twice on 11/25 (4W, +$1.09)'); setTimeout(saveSettings, 3000); } // v17: one-time correction of today's tally
+    if (!(blob.v >= 20) && env.BOT_TEST !== '1' && S.led && String(S.led.day) === '1795759200') { const o = { n: 49, nAuto: 49, w: 49, l: 6, pnl: 2.17, fees: 0.56, best: 0.69, worst: -1.85 }; // v20: the 4:27 AM CT false day roll (11/27) wiped midnight–4:27 AM; put it back
+      for (const k of ['n', 'nAuto', 'w', 'l']) S.led[k] = (S.led[k] || 0) + o[k]; S.led.pnl = Math.round((S.led.pnl + o.pnl) * 100) / 100; S.led.fees += o.fees; S.led.best = Math.max(S.led.best, o.best); S.led.worst = Math.min(S.led.worst, o.worst);
+      log('LED FIX', 'added back midnight–4:27 AM CT 11/27 (49 trades, 49W·6L, +$2.17) lost to a false day roll'); setTimeout(saveSettings, 3000); }
     if (!(blob.v >= 18) && env.BOT_TEST !== '1') setTimeout(() => { saveSettings(); say(`🧠 NEW REAL-MONEY RULES (your call 11/26: "do what's best for profit")\n📊 Your last 283 real trades won about as often as the price said (−1.0¢ per contract after fees). The losses came from two places:\n🌅 US mornings, 6–10 AM CT (data releases + the stock open flip late leaders): −10.8¢ per contract → real money now sits these out on US weekdays\n🪙 Leaders under 60¢ (a coin flip plus the biggest fee): −4.7¢ → skipped\n📏 No more 2×/3× bets: 1 contract per coin, growing with the account\n🧪 Paper tests still take every trade, so the bot keeps learning and switches rules on its own when one proves itself.\n⚙️ Change with /set latemin 0.6 · /set lateam 0`); }, 4000);
     if (S.led.fastOff) { S.led.fastOff = false; S.led.safe = true; setTimeout(() => { saveSettings(); say('🛡 Loss stop switched to SAFE MODE: trading again now — 1 contract at a time, only 5¢+ edges, no always-in. Back to normal size at midnight CT.'); }, 3000); }
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
@@ -232,6 +235,7 @@ function dayReport(L, title) {
 }
 async function rollDay(today) {
   if (S.led.day === today) return;
+  if (+S.led.day > 0 && +today > 0 && +today < +S.led.day + 3600) return; // same day (a key a second or an hour off is never a new day)
   if (S.led.day && (S.led.n || S.led.w || S.led.l)) await say(dayReport(S.led, 'DAILY REPORT (yesterday)'));
   S.led = { ...newLed(today), auto: S.led.auto || [] };
 }
@@ -285,10 +289,12 @@ const feeTotal = (c, p) => Math.ceil(0.07 * c * p * (1 - p) * 100 - 1e-9) / 100;
 const money = x => !isFinite(x) ? 'no limit' : (Number(x) < -0.004 ? '−$' : '$') + Math.abs(Number(x)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const cents = x => { const v = Math.round(x * 1000) / 10; return (Number.isInteger(v) ? v : v.toFixed(1)) + '¢'; };
 const timeCT = iso => new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, hour: 'numeric', minute: '2-digit' }).format(new Date(iso)) + ' CT';
-function startOfTodayCT() {
-  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(new Date()).map(x => [x.type, x.value]));
-  const elapsed = (+p.hour * 3600 + +p.minute * 60 + +p.second) * 1000;
-  return Math.floor((Date.now() - elapsed) / 1000);
+function startOfTodayCT(now = Date.now()) { // one clock reading only: reading the time twice could straddle a second and give midnight + 1 s, which looked like a new day (live 11/27 4:27 AM CT: a false "DAILY REPORT (yesterday)" and today's tally wiped)
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+  const hms = t => Object.fromEntries(fmt.formatToParts(new Date(t)).map(x => [x.type, x.value]));
+  const p = hms(now); let t0 = now - (+p.hour * 3600 + +p.minute * 60 + +p.second) * 1000;
+  const h = +hms(t0).hour; if (h === 23) t0 += 3600e3; else if (h === 1) t0 -= 3600e3; // a daylight-saving day: the wall clock skipped or repeated an hour since midnight
+  return Math.floor(t0 / 1000);
 }
 async function pageAll(path, key) {
   let out = [], cursor = '';

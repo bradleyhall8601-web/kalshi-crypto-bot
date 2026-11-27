@@ -72,7 +72,8 @@ global.fetch = async (url, o = {}) => {
         const st = Math.floor(Date.parse(q.get('start')) / 1000 / 60) * 60, en = Math.floor(Date.parse(q.get('end')) / 1000 / 60) * 60, rows = [];
         const z = i => { const h = Math.sin(i * 12.9898) * 43758.5453; return (h - Math.floor(h)) - 0.5; };
         const origin = Math.floor(Date.now() / 60000) - 6000; // random walk from a fixed origin (no pattern)
-        let lp = 0; const lvl = new Map(); for (let i = origin; i <= en / 60; i++) { lp += z(i) * 0.0017; if (i >= st / 60) lvl.set(i, lp); }
+        let lp = 0; const lvl = new Map(); for (let i = origin; i <= en / 60; i++) { lp += z(i - origin) * 0.0017; // the same walk every run: indexed by the clock it found a fake pattern at some times of day (failed 11/27 6 AM CT on old and new code)
+        if (i >= st / 60) lvl.set(i, lp); }
         for (let tt = en; tt >= st; tt -= 60) rows.push([tt, 0, 0, 0, W[coin] * Math.exp(lvl.get(tt / 60) || 0), 1]);
         return J(rows);
       }
