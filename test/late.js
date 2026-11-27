@@ -436,6 +436,32 @@ W.shards = { 0: 0.66, 2: 0 };
   W.onBalance = null; delete W.live[fall.ticker]; for (const m of [fall, hold]) delete W.markets[m.ticker];
   await send('/_ctclock off'); await send('/set latelive 0'); await wait(200);
 
+  console.log('\n17. Day limits (Brad 11/27: "set limits if needed to ensure profit gain but don\'t limit it on winning")');
+  for (const k of Object.keys(W.markets)) if (W.markets[k].status === 'open') delete W.markets[k];
+  await send('/_livereset'); await send('/_champ m12'); await send('/set latelive 1'); await send('/_ctclock 13 1'); await wait(300); W.shards[0] = 15.66;
+  await send('/_livesum 0'); await send('/_daycheck');
+  const dl0 = msgs().length;
+  for (const v of [1.6, 3.0, 5.2, 2.7]) { await send('/_livesum ' + v); await send('/_daycheck'); }
+  ok(!msgs().slice(dl0).some(m => /PROFIT LOCKED|DAY LOSS/.test(m)), 'a winning run is never capped: up to +$5.20, back to +$2.70 (above half of the best) keeps trading');
+  await send('/_livesum 2.5'); await send('/_daycheck'); await wait(200);
+  const lk = msgs().slice(dl0).find(m => /PROFIT LOCKED/.test(m));
+  ok(lk && /up \+\$5\.20 at best today and are now \+\$2\.50/.test(lk), 'gives back over half of the best → profit locked for the day', lk);
+  const r17 = W.orders.length, lm17 = market('KXXRP15M', 2.9, 0.80);
+  await send('/_fasttick'); await wait(4000);
+  ok(!W.orders.slice(r17).some(o => o.ticker === lm17.ticker) && L('m12').pos.some(o => o.t === lm17.ticker), 'locked: no real buy, practice still takes it');
+  await send('/paper'); await wait(400);
+  ok(/📅 Today \+\$2\.50 \(best \+\$5\.20\) · 🔒 profit locked until midnight/.test(last()), '/paper shows the day and the lock', last());
+  delete W.markets[lm17.ticker];
+  await send('/_dayold'); await send('/_daycheck');
+  const r17b = W.orders.length, nd = market('KXBNB15M', 2.9, 0.80);
+  await send('/_fasttick'); await wait(4000);
+  ok(W.orders.slice(r17b).some(o => o.ticker === nd.ticker), 'a new day: real buys back on');
+  delete W.markets[nd.ticker];
+  const dl1 = msgs().length; await send('/_livesum ' + (2.5 - 1.5)); await send('/_daycheck'); await send('/_livesum ' + (2.5 - 3)); await send('/_daycheck'); await wait(200);
+  const ls = msgs().slice(dl1).filter(m => /DAY LOSS LIMIT/.test(m));
+  ok(ls.length === 1 && /down \$3\.00 today \(limit \$2\.\d\d, 15% of the day's starting money\)/.test(ls[0]), 'down over 15% of the day\'s starting money (at least $2) → stops until midnight; −$1.50 did not', ls.join(' | ') || msgs().slice(dl1).join(' | '));
+  await send('/_ctclock off'); await send('/set latelive 0'); await wait(200);
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('TEST CRASH', e); process.exit(1); });

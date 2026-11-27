@@ -66,6 +66,7 @@ const CFG = {
   QUIET: 1, // Telegram: 1 = only what matters (news only when it pauses trading, window recap only when the main strategy acted); 0 = everything
   OTHER: 1, OT_LIVE: 1, OT_GOAL: 10, // weather + sports practice bets (Brad 11/26 8:30 PM: "place bets on sports, crypto, weather ASWELL", chose practice first; 8:43 PM: "Profit 10$ then go to REAL FUNDS")
   LATE_MIN: 0.60, LATE_AM: 1, // real 15-min money skips leaders under 60¢ and US mornings (6–10 AM CT on US weekdays) — 11/24–26 real record: −4.7¢ and −10.8¢/contract there; paper tests still take them
+  DAY_LOSS_PCT: 0.15, LOCK_MIN: 1.5, LOCK_KEEP: 0.5, // Brad 11/27: limits that protect the day's profit but never cap a winning run
   LATE: 1, LATE_MAX: 0.97, LATE_LIVE: 0, LATE_STOP: 5, LATE_PER: 15, LATE_GRACE: 0.01, // LATE_LIVE: real-money 12th-minute strategy (all coins), 1 contract per coin per LATE_PER $ of account; turns itself off after LATE_STOP $ lost
   // Brad's test: at the 12th minute of each 15-min market (and 12 min before each hourly/daily close), buy whichever side is winning
   PAPER_PROVE_N: 150, PAPER_PROVE_EDGE: 0.02, // go live after 150+ paper trades in all (and the last 50) averaging +2¢ per contract after fees (11/27: a rolling 50 swung −4.3¢ → +4.2¢ in two hours)
@@ -117,6 +118,9 @@ const SETTINGS = {
   lateper:  { key: 'LATE_PER', desc: 'real 12th-minute size: 1 contract per coin for every this many $ in the account', min: 1, max: 10000 },
   latestop: { key: 'LATE_STOP', desc: 'real 12th-minute strategy turns itself off after losing this many $ in total', min: 0.5, max: 10000 },
   latemin:  { key: 'LATE_MIN', desc: 'real 15-min buys skip a leader priced under this (a coin flip plus the biggest fee)', min: 0.01, max: 0.97 },
+  daystop:  { key: 'DAY_LOSS_PCT', desc: "real 15-min buys stop until midnight CT after losing this share of the day's starting money in a day (0.15 = 15%, at least $2; 0 = off)", min: 0, max: 1 },
+  lockmin:  { key: 'LOCK_MIN', desc: "profit lock starts once real 15-min buys are up this many $ in a day", min: 0.1, max: 10000 },
+  lockkeep: { key: 'LOCK_KEEP', desc: "profit lock: real 15-min buys stop until midnight CT if the day's profit falls below this share of its best (0.5 = keep half; 0 = off). Wins are never capped", min: 0, max: 0.95 },
   lateam:   { key: 'LATE_AM', desc: 'real 15-min buys sit out US mornings, 6–10 AM CT on US weekdays (data releases and the stock open flip late leaders): 1 on, 0 off', min: 0, max: 1 },
   other:    { key: 'OTHER', desc: 'weather + sports practice bets (paper; NWS forecasts/observations/alerts, sportsbook lines, live win %, injury news): 1 on, 0 off', min: 0, max: 1 },
   otlive:   { key: 'OT_LIVE', desc: 'real money on weather/sports once practice is up otgoal $, for each rule that is itself in profit: 1 on, 0 off', min: 0, max: 1 },
@@ -139,7 +143,7 @@ let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
   if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 21; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, tot: S.paper.tot, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); blob.OT = OT.blob(); // stories already paused for survive restarts; weather/sports practice records
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 22; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, tot: S.paper.tot, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); blob.OT = OT.blob(); // stories already paused for survive restarts; weather/sports practice records
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -200,6 +204,8 @@ async function loadSettings() {
     if (blob.CALFIT && typeof blob.CALFIT === "object") S.cal = blob.CALFIT;
     if (blob.LED && typeof blob.LED.spent === 'number') S.led = { ...newLed(blob.LED.day), ...blob.LED };
     if (!(blob.v >= 17) && env.BOT_TEST !== '1' && S.led && String(S.led.day) === '1795586400' && S.led.w >= 4) { S.led.w -= 4; S.led.pnl = Math.round((S.led.pnl - 1.09) * 100) / 100; log('LED FIX', 'removed the 12:45 PM CT results counted twice on 11/25 (4W, +$1.09)'); setTimeout(saveSettings, 3000); } // v17: one-time correction of today's tally
+    if (!(blob.v >= 22) && env.BOT_TEST !== '1') setTimeout(() => { saveSettings(); say(`🔒 NEW DAY LIMITS for real money (your call 11/27: "set limits if needed to ensure profit gain but don't limit it on winning")\n🛑 Real 15-min buys stop until midnight if the day's real result falls to −15% of the day's starting money (at least −$2).\n🔒 Once the day is up $1.50+, they stop until midnight if it gives back half of its best. No cap on wins.\n🧾 Fixed: "LOSS −$10.45 · NEAR 9:30 AM" was not a real loss — contracts in that market were sold before the close (the account's money went up). Such records are now left out of the tally.\n/set daystop 0 or /set lockkeep 0 turns a limit off.`); }, 6000); // Brad 11/27 9:31–9:40 AM
+    if (!(blob.v >= 22) && env.BOT_TEST !== '1' && S.led && String(S.led.day) === '1795759200' && S.led.pnl < -10 && S.led.l >= 1) { S.led.pnl = Math.round((S.led.pnl + 10.45) * 100) / 100; S.led.l -= 1; S.led.worst = Math.max(S.led.worst, -1.85); log('LED FIX', 'removed the false NEAR 9:30 AM CT −$10.45 (contracts sold before the close)'); setTimeout(saveSettings, 3000); } // v22
     if (!(blob.v >= 21) && env.BOT_TEST !== '1' && blob.v >= 20) { CFG.PAPER = 1; setTimeout(() => { saveSettings(); say(`📄 MODEL BIDS BACK TO PRACTICE (your call, 11/27 9:10 AM)\n💵 Real money stays on the 12th-minute strategy only.\n🎯 The model goes real again only after 150+ practice trades averaging +2¢ or better (and its last 50 too) — a 50-trade streak was mostly luck.\n🧾 Its open real bids are cancelled; anything already bought settles as normal.`); }, 4500); }
     if (!(blob.v >= 20) && env.BOT_TEST !== '1' && S.led && String(S.led.day) === '1795759200') { const o = { n: 49, nAuto: 49, w: 49, l: 6, pnl: 2.17, fees: 0.56, best: 0.69, worst: -1.85 }; // v20: the 4:27 AM CT false day roll (11/27) wiped midnight–4:27 AM; put it back
       for (const k of ['n', 'nAuto', 'w', 'l']) S.led[k] = (S.led[k] || 0) + o[k]; S.led.pnl = Math.round((S.led.pnl + o.pnl) * 100) / 100; S.led.fees += o.fees; S.led.best = Math.max(S.led.best, o.best); S.led.worst = Math.min(S.led.worst, o.worst);
@@ -320,6 +326,9 @@ async function account(fresh = false) {
   }
   const v = await accountRaw(); acctCache = { t: Date.now(), v }; return v;
 }
+// Kalshi's settlement shows the cost of every contract bought in the market, but pays only what is still held at the close: if some were sold before the close
+// (a manual trade), the record alone looks like a big loss (live 11/27 9:30 AM CT: "LOSS −$10.45" on NEAR while the account's money went UP). Held contracts can't cost over $1 each.
+const settleIncomplete = s => { if (['yes_count_fp', 'yes_count', 'no_count_fp', 'no_count'].every(k => s[k] === undefined)) return false; const yc = cnt(s, 'yes_count'), nc = cnt(s, 'no_count'), ycost = d(s, 'yes_total_cost') || 0, ncost = d(s, 'no_total_cost') || 0; return ycost > yc + 0.011 || ncost > nc + 0.011; };
 async function accountRaw() {
   const b = await kalshi('GET', '/portfolio/balance');
   const cash = d(b, 'balance');
@@ -329,7 +338,7 @@ async function accountRaw() {
   const pnlOf = s => d(s, 'revenue') - (d(s, 'yes_total_cost') || 0) - (d(s, 'no_total_cost') || 0) - (d(s, 'fee_cost') || 0);
   const LVx = S.paper && S.paper.late && S.paper.late.live, soldT = (LVx && LVx.soldT) || [];
   const emptySold = s => soldT.includes(s.ticker || s.market_ticker) && !(cnt(s, 'yes_count') > 0) && !(cnt(s, 'no_count') > 0); // fully sold before the close: its result was booked at the sale
-  for (const s of settles) if (!emptySold(s)) profit += pnlOf(s);
+  for (const s of settles) if (!emptySold(s) && !settleIncomplete(s)) profit += pnlOf(s);
   profit += (LVx && LVx.xadj) || 0; // early sales: Kalshi only settles what's still held at the close
   // report every newly settled trade
   const stime = s => Date.parse(s.settled_time || s.created_time || 0) || 0;
@@ -340,14 +349,15 @@ async function accountRaw() {
   for (const x of fresh) {
     const pl = pnlOf(x), res = String(x.market_result || x.result || '').toUpperCase(), tk = x.ticker || x.market_ticker;
     if (soldT.includes(tk)) { log('SOLD-EARLY SETTLEMENT', JSON.stringify(x)); if (emptySold(x)) continue; } // already counted when it was sold
+    if (settleIncomplete(x)) { log('SETTLEMENT INCOMPLETE', JSON.stringify(x)); setl.push({ pl: null, line: `ℹ️ ${label(tk)}: contracts were sold before the close (a manual trade?) — Kalshi's record can't show its real result, left out of the tally` }); continue; }
     await rollDay(String(startOfTodayCT()));
     if (pl >= 0) S.led.w++; else S.led.l++;
     S.led.pnl = Math.round((S.led.pnl + pl) * 100) / 100; S.led.best = Math.max(S.led.best, pl); S.led.worst = Math.min(S.led.worst, pl);
     setl.push({ pl, line: `${pl >= 0 ? '🏆 WIN' : '💔 LOSS'} ${pl >= 0 ? '+' : ''}${money(pl)} · ${label(tk)}${res ? ` → ${res}` : ''}` });
   }
   if (setl.length) { // one message per batch (a window's coins settle together) instead of one per coin
-    const net = setl.reduce((x, y) => x + y.pl, 0), wins = setl.filter(y => y.pl >= 0).length;
-    await say(`${setl.length > 1 ? `🧾 RESULTS · ${wins}W·${setl.length - wins}L ${net >= 0 ? '+' : '−'}${money(Math.abs(net))}\n` : ''}${setl.map(y => y.line).join('\n')}\n` +
+    const sc = setl.filter(y => y.pl !== null), net = sc.reduce((x, y) => x + y.pl, 0), wins = sc.filter(y => y.pl >= 0).length;
+    await say(`${sc.length > 1 ? `🧾 RESULTS · ${wins}W·${sc.length - wins}L ${net >= 0 ? '+' : '−'}${money(Math.abs(net))}\n` : ''}${setl.map(y => y.line).join('\n')}\n` +
       `📊 Today ${S.led.w}W·${S.led.l}L ${S.led.pnl >= 0 ? '+' : ''}${money(S.led.pnl)} · all-time ${profit >= 0 ? '+' : ''}${money(profit)}`);
   }
   if (fresh.length) saveSettings().catch(() => {});
@@ -848,7 +858,7 @@ const lateBlob = (keep = 30) => { const L = lateState(); return { v: Object.from
 const lateRec = k => { const V = lateState().v[k], n = V.n, sum = V.sum, w = V.w; return { n, sum, w, avg: n ? sum / n : 0 }; };
 const LATE_WINDOWS = 50, LATE_PASS = 0.02; // verdict after 50 graded windows: passes at +2¢/contract or better
 const lateLine = x => { const { n, sum, w, avg } = lateRec(x.k), nw = lateState().v[x.k].nw; return `⏰ ${x.name} test: ${n} trades · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract) · ${Math.min(nw, LATE_WINDOWS)}/${LATE_WINDOWS} windows`; };
-const liveLine = () => { const LV = lateState().live, on = [lateName(lateChamp()), ...LATE_VARIANTS.filter(x => x.slow && lateState().v[x.k].verdict === 'pass').map(x => x.name)].join(' + '); return `💵 REAL ${on} (all coins): ${CFG.LATE_LIVE === 1 ? 'ON' : LV.stopped ? 'STOPPED' : 'OFF'} · ${LV.n} trades · ${LV.w}W·${LV.n - LV.w}L · ${LV.sum >= 0 ? '+' : '−'}${money(Math.abs(LV.sum))} · ${CFG.LATE_STOP >= 10000 ? 'no loss limit' : `stops at −${money(CFG.LATE_STOP)}`} · ${LV.pos.length} open`; };
+const liveLine = () => { const LV = lateState().live, on = [lateName(lateChamp()), ...LATE_VARIANTS.filter(x => x.slow && lateState().v[x.k].verdict === 'pass').map(x => x.name)].join(' + '); return `💵 REAL ${on} (all coins): ${CFG.LATE_LIVE === 1 ? 'ON' : LV.stopped ? 'STOPPED' : 'OFF'} · ${LV.n} trades · ${LV.w}W·${LV.n - LV.w}L · ${LV.sum >= 0 ? '+' : '−'}${money(Math.abs(LV.sum))} · ${CFG.LATE_STOP >= 10000 ? 'no loss limit' : `stops at −${money(CFG.LATE_STOP)}`} · ${LV.pos.length} open` + (() => { const D = lateDay(), t = (LV.sum || 0) - D.s0; return `\n📅 Today ${t >= 0 ? '+' : '−'}${money(Math.abs(t))} (best +${money(D.pk || 0)})${D.off === 'lock' ? ' · 🔒 profit locked until midnight' : D.off === 'loss' ? ' · 🛑 day loss limit hit, back at midnight' : ` · stops at −${money(lateDayLoss())} or below ${Math.round(CFG.LOCK_KEEP * 100)}% of the day's best once it's up ${money(CFG.LOCK_MIN)}`}`; })(); };
 // self-learning switch (Brad 11/25): real 15-min money follows whichever rule has proven itself best lately; with none proven it stays on the plain 12th-minute rule (Brad: keep money on)
 const LATE_FAST = () => [{ k: 'm12', name: '12th-minute' }, { k: 'm125', name: '12½-minute' }, { k: 'm12b', name: '12th-min · bid 2¢ under' }, { k: 'm12x', name: '12th-min · sell early if it flips' }, ...LATE_FILTERS.map(F => ({ k: F.k, name: F.name, F }))]; // bid / sell-early: real resting bids and real selling built 11/25 evening (Brad: "Do what's needed"); like the others they only get real money after proving themselves
 const lateRecOf = k => { const L = lateState(); return L.v[k] || L.f[k]; };
@@ -870,9 +880,19 @@ function lateSize(f) { if (!lateOk(lateChamp())) return { mult: 1, per: CFG.LATE
 // biggest fee) and US mornings, 6–10 AM CT on US weekdays (−10.8¢: data releases and the stock open flip late leaders). Paper tests still take them.
 const ctHour = () => S.testHour !== undefined ? S.testHour : Number(new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, hour: '2-digit', hourCycle: 'h23' }).format(new Date()));
 const usMorning = () => !(env.BOT_TEST === '1' && S.testHour === undefined) && (S.testDataDay !== undefined ? S.testDataDay : news.usDataDay()) && ctHour() >= 6 && ctHour() < 10; // tests set the clock themselves
+function lateDay() { const LV = lateState().live, k = String(startOfTodayCT()); if (!LV.day || LV.day.k !== k) LV.day = { k, s0: LV.sum || 0, pk: 0 }; return LV.day; } // real 15-min money's day: start, best, and whether a day limit stopped it
+const lateDayLoss = () => Math.max(2, CFG.DAY_LOSS_PCT * (S.led.startCash > 0 ? S.led.startCash : 15));
+function lateDayCheck() { // after real results: 🛑 day loss limit, or 🔒 profit lock once it gives back too much of the day's best. Never stops a winning run.
+  const LV = lateState().live, D = lateDay(), today = Math.round(((LV.sum || 0) - D.s0) * 100) / 100; D.pk = Math.max(D.pk || 0, today);
+  if (D.off) return null;
+  if (CFG.DAY_LOSS_PCT > 0 && today <= -lateDayLoss()) { D.off = 'loss'; return `🛑 DAY LOSS LIMIT: real 15-min buys are down ${money(-today)} today (limit ${money(lateDayLoss())}, ${Math.round(CFG.DAY_LOSS_PCT * 100)}% of the day's starting money). No more real buys until midnight CT — practice keeps running. /set daystop 0 turns this off.`; }
+  if (CFG.LOCK_KEEP > 0 && D.pk >= CFG.LOCK_MIN && today < D.pk * CFG.LOCK_KEEP) { D.off = 'lock'; return `🔒 PROFIT LOCKED: real 15-min buys were up +${money(D.pk)} at best today and are now ${today >= 0 ? '+' : '−'}${money(Math.abs(today))} — stopping to keep the rest. Real buys resume at midnight CT; practice keeps running. Wins are never capped (it only stops after giving back ${Math.round((1 - CFG.LOCK_KEEP) * 100)}% of the day's best). /set lockkeep 0 turns this off.`; }
+  return null;
+}
 function lateLiveSkip(m, px) {
   if (!isFast(String(m.ticker).split('-')[0])) return null;
-  const why = px < CFG.LATE_MIN ? `leader under ${cents(CFG.LATE_MIN)}` : CFG.LATE_AM === 1 && usMorning() ? 'US morning (6–10 AM CT)' : null;
+  const off = lateDay().off;
+  const why = off ? (off === 'lock' ? 'profit locked for today' : 'day loss limit hit') : px < CFG.LATE_MIN ? `leader under ${cents(CFG.LATE_MIN)}` : CFG.LATE_AM === 1 && usMorning() ? 'US morning (6–10 AM CT)' : null;
   if (why) log('LATE LIVE skip', m.ticker, px, why);
   return why;
 }
@@ -881,7 +901,7 @@ async function realStats(sinceTs) {
   const st = await pageAll(`/portfolio/settlements?min_ts=${sinceTs}`, 'settlements'), rows = [];
   for (const x of st) {
     const tk = String(x.ticker || x.market_ticker || ''), m = tk.match(/^KX([A-Z]+)15M-/); if (!m) continue;
-    const yc = cnt(x, 'yes_count'), nc = cnt(x, 'no_count'), n = yc + nc; if (!(n > 0)) continue; // sold before the close: booked at the sale
+    const yc = cnt(x, 'yes_count'), nc = cnt(x, 'no_count'), n = yc + nc; if (!(n > 0) || settleIncomplete(x)) continue; // sold before the close: booked at the sale (or a manual trade the record can't price)
     const cost = (d(x, 'yes_total_cost') || 0) + (d(x, 'no_total_cost') || 0), pl = d(x, 'revenue') - cost - (d(x, 'fee_cost') || 0), t = Date.parse(x.settled_time || 0) || 0;
     const h = +new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, hour: '2-digit', hourCycle: 'h23' }).format(new Date(t - 5 * 60000));
     rows.push({ coin: m[1], n, px: cost / n, pl, t, h });
@@ -1200,7 +1220,7 @@ async function lateGrade() {
       const next = x.slow ? 'Real money now buys it too (1 contract per coin per $' + CFG.LATE_PER + ').' : 'The self-learning switch moves real 15-min money to it if it stays the best rule.';
       verdicts.push(V.verdict === 'pass' ? `✅ ${x.name} test PASSED after ${V.nw} windows: ${(avg * 100).toFixed(1)}¢/contract (needed +${Math.round(LATE_PASS * 100)}¢). ${next}` : `❌ ${x.name} test FAILED after ${V.nw} windows: ${(avg * 100).toFixed(1)}¢/contract (needed +${Math.round(LATE_PASS * 100)}¢). It keeps recording, but this idea isn't profitable as-is.`); }
   }
-  { const LV = L.live, lines = [];
+  { const LV = L.live, lines = []; lateDay(); // a new day starts from the record as it stood before these results
     for (const o of LV.pos.filter(o => Date.now() > o.c + 3 * 60e3)) {
       let m; try { m = (await kalshi('GET', `/markets/${o.t}`)).market || {}; } catch (e) { continue; }
       const res = String(m.result || '').toLowerCase(); if (res !== 'yes' && res !== 'no') continue; // real money: keep waiting for Kalshi's result
@@ -1210,6 +1230,7 @@ async function lateGrade() {
     }
     if (lines.length) { // Kalshi's own settlement message (🧾 RESULTS) already tells Brad each real win/loss: log only here
       log('LATE LIVE', lines.join(' | ')); log('LATE LIVE RECORD', `n=${LV.n} w=${LV.w} sum=${LV.sum.toFixed(2)}`); graded = true;
+      const dl = lateDayCheck(); if (dl) { log('LATE DAY', JSON.stringify(lateDay())); verdicts.push(dl); }
       if (CFG.LATE_LIVE === 1 && LV.sum - (LV.base || 0) <= -CFG.LATE_STOP) { /* limit counts from when real trading was last switched back on */ CFG.LATE_LIVE = 0; LV.stopped = Date.now(); verdicts.push(`🛑 REAL 12th-minute test STOPPED itself: down ${money(-LV.sum)} (limit ${money(CFG.LATE_STOP)}). No more real buys. /set latelive 1 restarts it.`); }
     } }
   if (graded) { log('LATE RECORD', LATE_VARIANTS.map(x => { const r = lateRec(x.k); return `${x.k} n=${r.n} w=${r.w} sum=${r.sum.toFixed(2)}`; }).join(' | ') + ' || ' + LATE_FILTERS.map(F => { const R = L.f[F.k]; return `${F.k} n=${R.n} w=${R.w} sum=${R.sum.toFixed(2)} win=${lateWins(F.k)}`; }).join(' | ')); // full totals in the log (Telegram log lines are truncated)
@@ -1695,6 +1716,9 @@ async function onUpdate(u) {
   if (env.BOT_TEST === '1' && t === '/_clearage') { for (const b of Object.values(S.blk || {})) if (b.clearAt) b.clearAt -= 4 * 60e3; return; } // tests: conditions have been calm for 3+ minutes
   if (env.BOT_TEST === '1' && t.startsWith('/_champ ')) { lateState().ch = t.split(' ')[1]; return; } // tests: make a rule the one real money follows
   if (env.BOT_TEST === '1' && t === '/_livereset') { lateState().live = {}; lateState(); return; } // tests: fresh real record
+  if (env.BOT_TEST === '1' && t.startsWith('/_livesum ')) { lateState().live.sum = Number(t.split(/\s+/)[1]); return; } // tests: real record total
+  if (env.BOT_TEST === '1' && t === '/_daycheck') { const x = lateDayCheck(); if (x) await say(x); return; }
+  if (env.BOT_TEST === '1' && t === '/_dayold') { lateDay().k = '1'; return; } // tests: pretend the day changed
   if (env.BOT_TEST === '1' && t === '/_acct2') { acctCache = null; await Promise.all([account(true), account(true)]); return; } // tests: two scans read the account at the same moment
   if (env.BOT_TEST === '1' && t === '/_lateage') { const L = lateState(), all = [...Object.values(L.v).flatMap(V => V.pos), ...L.live.pos]; if (all.length) { const dt = Date.now() - 4 * 60e3 - Math.max(...all.map(o => o.c)); for (const o of all) o.c += dt; } return; } // tests: every open window closed 4 min ago (windows keep their own close times)
   if (env.BOT_TEST === '1' && /^\/_bench \w+( -?[\d.]+){0,4}$/.test(t)) { const a = t.split(' ').slice(2).map(Number); bnState().c[t.split(' ')[1].toUpperCase()] = a.length === 4 ? a : [25, -2, 10, -1]; return; } // tests: a coin with 35 recent trades at −8.6¢/contract (or the 4 numbers given)
