@@ -292,10 +292,10 @@ function create(deps) {
   const lines = () => `🧪 Weather/sports practice (${cfg().OTHER === 1 ? 'on' : 'off'}):\n${recLines()}${O.live.n || O.live.pos.length ? `\n💵 Real weather/sports: ${O.live.n} trades · ${O.live.w}W·${O.live.n - O.live.w}L · ${O.live.sum >= 0 ? '+' : '−'}${money(Math.abs(O.live.sum))} · ${O.live.pos.length} open` : ''}`;
   const liveOpen = () => O.live.pos.reduce((a, o) => a + o.cost, 0);
   // what goes in the pinned settings (open practice bets compact; dropped first if the save is short of room)
-  const blob = (keepOpen = true) => ({ r: O.r, ...(keepOpen && O.p.length ? { p: O.p.map(o => [o.k, o.t, o.side === 'yes' ? 1 : 0, Math.round(o.px * 1000), Math.round(o.c / 60e3), ...(o.mu !== undefined ? [o.mu] : [])]) } : {}), ...(O.live.n || O.live.pos.length ? { live: O.live } : {}), ...(Object.keys(O.e).length ? { e: O.e } : {}) });
+  const blob = (keepOpen = true) => ({ r: Object.fromEntries(RULES.filter(x => O.r[x.k].n || O.r[x.k].b.some(v => v)).map(x => { const R = O.r[x.k]; return [x.k, [R.n, R.w, R.sum, ...R.b]]; })), ...(keepOpen && O.p.length ? { p: O.p.map(o => [o.k, o.t, o.side === 'yes' ? 1 : 0, Math.round(o.px * 1000), Math.round(o.c / 60e3), ...(o.mu !== undefined ? [o.mu] : [])]) } : {}), ...(O.live.n || O.live.pos.length ? { live: O.live } : {}), ...(Object.keys(O.e).length ? { e: O.e } : {}) });
   function load(b) {
     if (!b || typeof b !== 'object') return;
-    for (const x of RULES) if (b.r && b.r[x.k] && typeof b.r[x.k].n === 'number') O.r[x.k] = { n: 0, w: 0, sum: 0, b: [0, 0, 0, 0], ...b.r[x.k] };
+    for (const x of RULES) { const a = b.r && b.r[x.k]; if (Array.isArray(a) && a.length >= 7) O.r[x.k] = { n: a[0], w: a[1], sum: a[2], b: a.slice(3, 7) }; else if (a && typeof a.n === 'number') O.r[x.k] = { n: 0, w: 0, sum: 0, b: [0, 0, 0, 0], ...a }; }
     if (Array.isArray(b.p)) O.p = b.p.filter(a => Array.isArray(a) && a.length >= 5).map(a => ({ k: a[0], t: a[1], ev: String(a[1]).split('-').slice(0, -1).join('-'), side: a[2] ? 'yes' : 'no', px: a[3] / 1000, c: a[4] * 60e3, ...(a[5] !== undefined ? { mu: a[5] } : {}) }));
     if (b.live && Array.isArray(b.live.pos)) O.live = { n: 0, w: 0, sum: 0, ...b.live };
     if (b.e && typeof b.e === 'object') O.e = b.e;

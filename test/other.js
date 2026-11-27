@@ -108,8 +108,8 @@ const game = (id, state, startMs, home, away, more = {}) => ({ id, date: iso(sta
   ok(/✅ 🏈 NFL · Lions vs Bears · Detroit @ 56¢ → \+\$0\.42 · ✔️ ESPN final DET 27–CHI 20/.test(res), 'Detroit win graded and confirmed by ESPN\'s final', res);
   ok(/❌ 🏈 NFL · Chiefs vs Broncos · Kansas City @ 86¢ → −\$0\.87 · ⚠️ ESPN final KC 24–DEN 17 disagrees with Kalshi — flagged/.test(res), 'a Kalshi result that disagrees with ESPN is flagged', res);
   ok(/weather · forecast vs price: 1 trades · 1W·0L · \+\$0\.10/.test(res) && /sports · late-game leader \(live win %\): 1 trades · 0W·1L · −\$0\.87/.test(res) && /🎯 Practice total −\$0\.11 — real money at \+\$10/.test(res), 'each rule keeps its own record; practice total −$0.11', res);
-  await until(() => (pinned().OT || {}).r && pinned().OT.r.wxf.n === 1);
-  const P = pinned().OT; ok(P && P.r.wxf.n === 1 && P.r.wxl.n === 1 && P.r.spp.n === 1 && P.r.spl.n === 1 && !(P.p || []).some(x => [ny64, ch58, det, kc].some(m => m.ticker === x[1])), 'records saved in the pinned settings (survive restarts); graded bets leave the open list', JSON.stringify(P));
+  await until(() => (pinned().OT || {}).r && pinned().OT.r.wxf && pinned().OT.r.wxf[0] === 1);
+  const P = pinned().OT; ok(P && P.r.wxf[0] === 1 && P.r.wxl[0] === 1 && P.r.spp[0] === 1 && P.r.spl[0] === 1 && P.r.spl[2] === -0.87 && !(P.p || []).some(x => [ny64, ch58, det, kc].some(m => m.ticker === x[1])), 'records saved in the pinned settings (survive restarts); graded bets leave the open list', JSON.stringify(P));
 
   console.log('\n5. Practice up +$10 and the rule in profit → real money (re-quoted before, position verified after)');
   await send('/_otherprove spl'); await wait(100);
