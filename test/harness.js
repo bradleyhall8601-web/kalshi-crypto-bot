@@ -95,6 +95,7 @@ global.fetch = async (url, o = {}) => {
   }
   if (u.includes('site.api.espn.com')) {
     W.espnUA = (o.headers || {})['User-Agent'];
+    if (W.espn403 > 0) { W.espn403--; return J({ error: 'Access Denied' }, 403); } // ESPN's CDN: an occasional 403
     const X = W.espn || {}, pth = new URL(u).pathname, lg = (pth.match(/sports\/([^/]+\/[^/]+)\//) || [])[1], L = X[lg] || {};
     if (pth.endsWith('/scoreboard')) return J({ events: (typeof L.events === 'function' ? L.events() : L.events) || [] });
     if (pth.endsWith('/news')) return L.newsDown ? J({ error: 'down' }, 500) : J({ articles: L.news || [] });

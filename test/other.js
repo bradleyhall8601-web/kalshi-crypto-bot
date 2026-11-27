@@ -82,7 +82,7 @@ const game = (id, state, startMs, home, away, more = {}) => ({ id, date: iso(sta
   ok(!/B60\.5|60–61°|T61|62°\+/.test(bet), 'the model never bets far from the market price (max 15¢ apart)', bet);
   ok(!/Knicks|New York @/.test(bet) && !/Bruins|Boston @/.test(bet), 'fresh "ruled out" news blocks the Knicks bet; NHL news down → no Bruins bet (no news check, no bet)', bet);
   ok(/Paper only — real money starts once practice makes \+\$10/.test(bet) && W.orders.length === o0, 'practice only: no real orders', W.orders.slice(o0).map(o => o.ticker).join());
-  ok(/^Mozilla\/5\.0 \(compatible; kalshi-crypto-bot/.test(W.espnUA || ''), 'ESPN gets plain JSON headers (its CDN refused the NWS-style ones)', W.espnUA);
+  ok(/^kalshi-crypto-bot\//.test(W.espnUA || ''), 'ESPN gets the plain bot User-Agent (a browser-style one got 403s)', W.espnUA);
   m0 = msgs().length; await send('/_other'); await wait(2500);
   ok(!/PRACTICE BETS/.test(since(m0)), 'one practice bet per market and rule (no repeats)', since(m0));
 
@@ -94,7 +94,8 @@ const game = (id, state, startMs, home, away, more = {}) => ({ id, date: iso(sta
   const g6 = game('g6', 'pre', t0 + 50 * 60e3, team('PHI', 'Philadelphia', '76ers'), team('MIL', 'Milwaukee', 'Bucks'), { odds: { moneyline: { home: { close: { odds: '-160' } }, away: { close: { odds: '+140' } } } } });
   const phi = mk(`KXNBAGAME-${etc(t0 + 50 * 60e3)}MILPHI-PHI`, `KXNBAGAME-${etc(t0 + 50 * 60e3)}MILPHI`, 0.52, 0.51, { yes_sub_title: 'Philadelphia' }); mk(`KXNBAGAME-${etc(t0 + 50 * 60e3)}MILPHI-MIL`, phi.event_ticker, 0.49, 0.48, { yes_sub_title: 'Milwaukee' });
   W.espn['basketball/nba'].events = [g3, g6]; W.live = { [phi.ticker]: { ...phi, yes_ask_dollars: '0.6200', yes_bid_dollars: '0.6100' } }; // the live book: 62¢, not 52¢
-  m0 = msgs().length; await send('/_other'); await wait(3000);
+  W.espn403 = 1; m0 = msgs().length; await send('/_other'); await wait(3000);
+  ok(W.espn403 === 0, 'a one-off ESPN 403 is retried', String(W.espn403));
   ok(!/Bills|Buffalo/.test(since(m0)) && !/76ers|Philadelphia/.test(since(m0)), 'no bet: the score tied on the fresh check; the live Kalshi price (62¢) left no edge', since(m0));
   delete W.live[phi.ticker]; W.espn['football/nfl'].events = [g1, g2];
 

@@ -10,7 +10,7 @@
 
 const NWS = 'https://api.weather.gov', ESPN = 'https://site.api.espn.com/apis/site/v2/sports';
 const UA = { 'User-Agent': 'kalshi-crypto-bot/1.0 (practice bets; github.com/bradleyhall8601-web/kalshi-crypto-bot)', Accept: 'application/geo+json, application/json' }; // NWS asks for an identifying User-Agent
-const UA_ESPN = { 'User-Agent': 'Mozilla/5.0 (compatible; kalshi-crypto-bot/1.0)', Accept: 'application/json' }; // ESPN's CDN turned the NWS-style headers away (403, live 11/26 10:39 PM CT)
+const UA_ESPN = UA; // ESPN: the browser-style "Mozilla/5.0 (compatible; …)" header got every league a 403 (live 11/26 11:17 PM CT); the plain bot name works
 const WX_SERIES = ['KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHAUS', 'KXHIGHDEN', 'KXHIGHPHIL', 'KXHIGHHOU'];
 const CITY = { KXHIGHNY: 'NYC', KXHIGHCHI: 'Chicago', KXHIGHMIA: 'Miami', KXHIGHLAX: 'LA', KXHIGHAUS: 'Austin', KXHIGHDEN: 'Denver', KXHIGHPHIL: 'Philadelphia', KXHIGHHOU: 'Houston' };
 const LEAGUES = [
@@ -80,7 +80,8 @@ function create(deps) {
   const O = { r: {}, p: [], live: { n: 0, w: 0, sum: 0, pos: [] }, e: {} };
   for (const x of RULES) O.r[x.k] = { n: 0, w: 0, sum: 0, b: [0, 0, 0, 0] };
   const mem = { st: {}, grid: {}, obs: {}, al: {}, sb: {}, news: {}, wp: {}, prevMu: {}, wxAt: 0, gradeAt: 0, warned: {}, sumAt: {} };
-  const get = (url, ttl, box, key) => { const c = box[key]; if (c && now() - c.at < ttl) return c.p; const p = req(url, { headers: url.startsWith(ESPN) ? UA_ESPN : UA }).catch(e => { delete box[key]; throw e; }); box[key] = { at: now(), p }; return p; };
+  const fetch1 = async url => { const espn = url.startsWith(ESPN); try { return await req(url, { headers: espn ? UA_ESPN : UA }); } catch (e) { if (!espn || !/-> 403/.test(e.message)) throw e; await new Promise(r => setTimeout(r, deps.retryMs === undefined ? 1500 : deps.retryMs)); return req(url, { headers: UA_ESPN }); } }; // ESPN's CDN sometimes answers 403 once: one retry
+  const get = (url, ttl, box, key) => { const c = box[key]; if (c && now() - c.at < ttl) return c.p; const p = fetch1(url).catch(e => { delete box[key]; throw e; }); box[key] = { at: now(), p }; return p; };
   const fee1 = px => feeTotal(1, px);
   const recent = R => { const n = R.b[0] + R.b[2]; return { n, avg: n ? (R.b[1] + R.b[3]) / n : 0 }; };
   const total = () => r2(RULES.reduce((a, x) => a + O.r[x.k].sum, 0));
@@ -254,7 +255,7 @@ function create(deps) {
   async function sourceCheck(o, py) {
     const s = o.src; if (!s) return '';
     try {
-      if (s.lg) { const sm = (await req(`${ESPN}/${s.lg}/summary?event=${s.id}`, { headers: UA_ESPN })) || {}, cs = ((((sm.header || {}).competitions || [])[0] || {}).competitors) || [];
+      if (s.lg) { const sm = (await fetch1(`${ESPN}/${s.lg}/summary?event=${s.id}`)) || {}, cs = ((((sm.header || {}).competitions || [])[0] || {}).competitors) || [];
         if (!(cs.length === 2 && cs.some(c => c.winner === true))) return ' · source: no ESPN final yet';
         const mine = cs.find(c => String((c.team || {}).abbreviation || '').toUpperCase() === String(s.ab).toUpperCase()); if (!mine) return ' · source: team not found';
         const score = cs.map(c => `${(c.team || {}).abbreviation} ${c.score}`).join('–');
