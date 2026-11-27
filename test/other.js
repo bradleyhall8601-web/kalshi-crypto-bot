@@ -82,6 +82,7 @@ const game = (id, state, startMs, home, away, more = {}) => ({ id, date: iso(sta
   ok(!/B60\.5|60–61°|T61|62°\+/.test(bet), 'the model never bets far from the market price (max 15¢ apart)', bet);
   ok(!/Knicks|New York @/.test(bet) && !/Bruins|Boston @/.test(bet), 'fresh "ruled out" news blocks the Knicks bet; NHL news down → no Bruins bet (no news check, no bet)', bet);
   ok(/Paper only — real money starts once practice makes \+\$10/.test(bet) && W.orders.length === o0, 'practice only: no real orders', W.orders.slice(o0).map(o => o.ticker).join());
+  ok(/^Mozilla\/5\.0 \(compatible; kalshi-crypto-bot/.test(W.espnUA || ''), 'ESPN gets plain JSON headers (its CDN refused the NWS-style ones)', W.espnUA);
   m0 = msgs().length; await send('/_other'); await wait(2500);
   ok(!/PRACTICE BETS/.test(since(m0)), 'one practice bet per market and rule (no repeats)', since(m0));
 

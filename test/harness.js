@@ -94,6 +94,7 @@ global.fetch = async (url, o = {}) => {
     return J({}, 404);
   }
   if (u.includes('site.api.espn.com')) {
+    W.espnUA = (o.headers || {})['User-Agent'];
     const X = W.espn || {}, pth = new URL(u).pathname, lg = (pth.match(/sports\/([^/]+\/[^/]+)\//) || [])[1], L = X[lg] || {};
     if (pth.endsWith('/scoreboard')) return J({ events: (typeof L.events === 'function' ? L.events() : L.events) || [] });
     if (pth.endsWith('/news')) return L.newsDown ? J({ error: 'down' }, 500) : J({ articles: L.news || [] });

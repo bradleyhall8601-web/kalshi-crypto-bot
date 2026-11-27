@@ -9,7 +9,8 @@
 'use strict';
 
 const NWS = 'https://api.weather.gov', ESPN = 'https://site.api.espn.com/apis/site/v2/sports';
-const UA = { 'User-Agent': 'kalshi-crypto-bot/1.0 (practice bets; github.com/bradleyhall8601-web/kalshi-crypto-bot)', Accept: 'application/geo+json, application/json' };
+const UA = { 'User-Agent': 'kalshi-crypto-bot/1.0 (practice bets; github.com/bradleyhall8601-web/kalshi-crypto-bot)', Accept: 'application/geo+json, application/json' }; // NWS asks for an identifying User-Agent
+const UA_ESPN = { 'User-Agent': 'Mozilla/5.0 (compatible; kalshi-crypto-bot/1.0)', Accept: 'application/json' }; // ESPN's CDN turned the NWS-style headers away (403, live 11/26 10:39 PM CT)
 const WX_SERIES = ['KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHAUS', 'KXHIGHDEN', 'KXHIGHPHIL', 'KXHIGHHOU'];
 const CITY = { KXHIGHNY: 'NYC', KXHIGHCHI: 'Chicago', KXHIGHMIA: 'Miami', KXHIGHLAX: 'LA', KXHIGHAUS: 'Austin', KXHIGHDEN: 'Denver', KXHIGHPHIL: 'Philadelphia', KXHIGHHOU: 'Houston' };
 const LEAGUES = [
@@ -78,8 +79,8 @@ function create(deps) {
   const now = () => (deps.now ? deps.now() : Date.now());
   const O = { r: {}, p: [], live: { n: 0, w: 0, sum: 0, pos: [] }, e: {} };
   for (const x of RULES) O.r[x.k] = { n: 0, w: 0, sum: 0, b: [0, 0, 0, 0] };
-  const mem = { st: {}, grid: {}, obs: {}, al: {}, sb: {}, news: {}, wp: {}, prevMu: {}, wxAt: 0, gradeAt: 0, warned: {} };
-  const get = (url, ttl, box, key) => { const c = box[key]; if (c && now() - c.at < ttl) return c.p; const p = req(url, { headers: UA }).catch(e => { delete box[key]; throw e; }); box[key] = { at: now(), p }; return p; };
+  const mem = { st: {}, grid: {}, obs: {}, al: {}, sb: {}, news: {}, wp: {}, prevMu: {}, wxAt: 0, gradeAt: 0, warned: {}, sumAt: {} };
+  const get = (url, ttl, box, key) => { const c = box[key]; if (c && now() - c.at < ttl) return c.p; const p = req(url, { headers: url.startsWith(ESPN) ? UA_ESPN : UA }).catch(e => { delete box[key]; throw e; }); box[key] = { at: now(), p }; return p; };
   const fee1 = px => feeTotal(1, px);
   const recent = R => { const n = R.b[0] + R.b[2]; return { n, avg: n ? (R.b[1] + R.b[3]) / n : 0 }; };
   const total = () => r2(RULES.reduce((a, x) => a + O.r[x.k].sum, 0));
@@ -197,7 +198,8 @@ function create(deps) {
       let evs; try { evs = await scoreboard(L); } catch (e) { log('OTHER scoreboard failed', L.k, e.message); continue; }
       const t = now(), games = evs.map(gameOf).filter(g => g.comps.length === 2);
       const want = games.flatMap(g => [g.state === 'pre' && g.start - t <= 90 * 60e3 && g.start - t >= 3 * 60e3 ? 'spp' : null, g.state === 'in' && g.period === L.last && g.clock <= L.lateSec ? 'spl' : null].filter(Boolean).map(k => ({ g, k })));
-      if (!want.length) continue;
+      const note = (n, m) => { if (n || now() - (mem.sumAt[L.k] || 0) > 30 * 60e3) { mem.sumAt[L.k] = now(); log('OTHER sports', L.k, `${games.length} games on ESPN, ${n} in a betting window, ${m} matched to Kalshi`); } };
+      if (!want.length) { note(0, 0); continue; }
       let ms; try { ms = ((await kalshi('GET', `/markets?series_ticker=${L.series}&status=open&limit=1000`)) || {}).markets || []; } catch (e) { log('OTHER sports markets failed', L.k, e.message); continue; }
       const byEv = {}; for (const m of ms) (byEv[m.event_ticker] = byEv[m.event_ticker] || []).push(m);
       const arts = await leagueNews(L);
@@ -207,6 +209,7 @@ function create(deps) {
           if (a >= 0 && b >= 0 && a !== b && Math.abs(kd - gd) <= 86400e3) hits.push({ ev, mk: { [a]: mk[0], [b]: mk[1] }, off: Math.abs(kd - gd) }); }
         return hits.sort((x, y) => x.off - y.off)[0] || null; };
       const tag = g => `${L.icon} ${L.k} · ${g.comps.map(c => (c.team || {}).shortDisplayName || (c.team || {}).abbreviation).join(' vs ')}`;
+      note(want.length, want.filter(({ g }) => find(g)).length);
       for (const { g, k } of want) {
         const hit = find(g); if (!hit || has(hit.ev, k)) continue;
         const r = await sportsEval(L, g, hit, k, arts, false); if (r.skip) { if (/news/.test(r.skip)) log('OTHER', k, 'skip', hit.ev, r.skip); continue; }
@@ -251,7 +254,7 @@ function create(deps) {
   async function sourceCheck(o, py) {
     const s = o.src; if (!s) return '';
     try {
-      if (s.lg) { const sm = (await req(`${ESPN}/${s.lg}/summary?event=${s.id}`, { headers: UA })) || {}, cs = ((((sm.header || {}).competitions || [])[0] || {}).competitors) || [];
+      if (s.lg) { const sm = (await req(`${ESPN}/${s.lg}/summary?event=${s.id}`, { headers: UA_ESPN })) || {}, cs = ((((sm.header || {}).competitions || [])[0] || {}).competitors) || [];
         if (!(cs.length === 2 && cs.some(c => c.winner === true))) return ' · source: no ESPN final yet';
         const mine = cs.find(c => String((c.team || {}).abbreviation || '').toUpperCase() === String(s.ab).toUpperCase()); if (!mine) return ' · source: team not found';
         const score = cs.map(c => `${(c.team || {}).abbreviation} ${c.score}`).join('–');
