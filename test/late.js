@@ -440,6 +440,9 @@ W.shards = { 0: 0.66, 2: 0 };
   for (const k of Object.keys(W.markets)) if (W.markets[k].status === 'open') delete W.markets[k];
   await send('/_livereset'); await send('/_champ m12'); await send('/set latelive 1'); await send('/_ctclock 13 1'); await wait(300); W.shards[0] = 15.66;
   await send('/_livesum 0'); await send('/_daycheck');
+  const dl00 = msgs().length; await send('/_livesum 1.6'); await send('/_daycheck'); await send('/_livesum 0.2'); await send('/_daycheck'); await wait(200);
+  ok(!msgs().slice(dl00).some(m => /PROFIT LOCKED/.test(m)), 'profit lock is off by default (Brad 11/27 8:48 PM: "CONSTANT FIRE OFF WHEN READY"): up $1.60, back to $0.20, keeps trading');
+  await send('/set lockkeep 0.5'); await send('/_livesum 0'); await send('/_dayold'); await send('/_daycheck'); await wait(200); // a fresh day starting at 0, lock on, for the lock tests below
   const dl0 = msgs().length;
   for (const v of [1.6, 3.0, 5.2, 2.7]) { await send('/_livesum ' + v); await send('/_daycheck'); }
   ok(!msgs().slice(dl0).some(m => /PROFIT LOCKED|DAY LOSS/.test(m)), 'a winning run is never capped: up to +$5.20, back to +$2.70 (above half of the best) keeps trading');
