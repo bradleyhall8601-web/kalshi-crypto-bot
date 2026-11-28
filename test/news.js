@@ -87,6 +87,7 @@ const AT_1130PM = Date.parse('2026-11-26T05:30:00Z');
 ok(!pauses('Binance hack: court freezes $6.5bn, beware phishing - CryptoTicker.io', AT_1130PM), 'court follow-up to the Oct 29 Binance hack does not pause (live 11:30 PM CT)');
 ok(!pauses('Binance Hack: Court Docs Reveal 192 Crypto Assets Stolen - Daily Beirut', AT_1130PM), '"court docs reveal…" about the old hack does not pause (live 5:32 AM CT)');
 ok(!pauses('Scammers bait TRON users with frozen USDT, then drain their TRX deposits - CryptoSlate', AT_1130PM), 'a scam draining users is not a market event (live 6:50 AM CT)');
+ok(!pauses('Tether can freeze stolen crypto in minutes. Getting it back can take years. - CoinDesk', AT_1130PM), 'an explainer on how freezes work does not pause (live 11/27 4:01 AM CT: skipped the 4:15 AM window)');
 ok(pauses('Binance hacked: $400M drained from hot wallet - CoinDesk', AT_1130PM) && pauses('Tether freezes redemptions as USDT depegs - Reuters', AT_1130PM), 'a fresh exchange hack / stablecoin depeg still pauses');
 ok(pauses('Kraken files for bankruptcy - Reuters', AT_1130PM) && pauses('Coinbase insolvent, halts withdrawals - Bloomberg', AT_1130PM), '"bankruptcy" and "insolvent" match (they did not: the words were cut short)');
 ok(!pauses('Federal Reserve: Gradual hikes priced – Commerzbank - FXStreet', AT_1130PM) && !pauses('Fed: Two more hikes likely – ING - FXStreet', AT_1130PM), 'bank analyst notes ("– Commerzbank", "– ING") do not pause (live 11/26 8:55 AM CT)');

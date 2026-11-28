@@ -110,7 +110,7 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(real.some(o => o.ticker === le.ticker), 'every coin trades, not just BTC');
   ok(!real.some(o => o.ticker === l10.ticker), 'nothing at the 10th minute (removed variant) uses real money');
   const rb = msgs().filter(m => /💵 REAL BUY \(12th-minute\)/.test(m));
-  ok(rb.length === 1 && /BTC 15-min/.test(rb[0]) && /ETH 15-min/.test(rb[0]) && /2 coins/.test(rb[0]) && /Wallet ≈/.test(rb[0]), 'all the window\'s real buys arrive in ONE message', JSON.stringify(rb));
+  ok(rb.length === 1 && /BTC 15-min/.test(rb[0]) && /ETH 15-min/.test(rb[0]) && /2 coins/.test(rb[0]) && /cash left \$/.test(rb[0]), 'all the window\'s real buys arrive in ONE message', JSON.stringify(rb));
   ok(L('m12').pos.some(o => o.t === lb.ticker), 'paper record still kept alongside');
   await send('/_fasttick'); await wait(2500);
   ok(W.orders.slice(r0).filter(o => o.ticker === lb.ticker).length === 1, 'one real buy per coin per window');
@@ -472,7 +472,21 @@ W.shards = { 0: 0.66, 2: 0 };
   const dl1 = msgs().length; await send('/_livesum ' + (2.5 - 1.5)); await send('/_daycheck'); await send('/_livesum ' + (2.5 - 3)); await send('/_daycheck'); await wait(200);
   const ls = msgs().slice(dl1).filter(m => /DAY LOSS LIMIT/.test(m));
   ok(ls.length === 1 && /down \$3\.00 today \(limit \$2\.\d\d, 15% of the day's starting money\)/.test(ls[0]), 'down over 15% of the day\'s starting money (at least $2) → stops until midnight; −$1.50 did not', ls.join(' | ') || msgs().slice(dl1).join(' | '));
-  await send('/_ctclock off'); await send('/set latelive 0'); await wait(200);
+  await send('/_ctclock off'); await wait(200);
+
+  console.log('\n18. Clean Telegram (Brad 11/27 9:51 PM: "make sure the Telegram is reporting properly and clean")');
+  for (const k of Object.keys(W.markets)) if (W.markets[k].status === 'open') delete W.markets[k];
+  await send('/_livereset'); await send('/_champ m12'); await send('/set daystop 0'); await send('/set clean 1'); await wait(300);
+  const c18 = msgs().length, r18 = W.orders.length, cb = market('KXBTC15M', 2.9, 0.85), ce = market('KXETH15M', 2.9, 0.85);
+  await send('/_fasttick'); await wait(4000);
+  ok(W.orders.slice(r18).some(o => o.ticker === cb.ticker) && msgs().slice(c18).some(m => /💵 REAL BUY/.test(m) && /cash left \$/.test(m)), 'clean: real buys still fire and still report (with the cash left)', msgs().slice(c18).join(' || '));
+  settle(cb, 'yes'); settle(ce, 'yes'); await send('/_lateclosed'); await send('/_livelateclosed'); await wait(100); await send('/scan'); await wait(5000);
+  await until(() => (pinned().PAPERS.late.live || {}).n === 2);
+  ok(!msgs().slice(c18).some(m => /BUY-THE-WINNER TEST|WINDOW RECAP|PAPER RESULTS|SELF-CALIBRATION|RESEARCH UPDATE/.test(m)), 'clean: no practice/test totals every window', msgs().slice(c18).filter(m => /BUY-THE-WINNER|RECAP|PAPER RESULTS/.test(m)).join(' || '));
+  await send('/_practice'); await wait(400);
+  ok(/📄 UPDATE \(every 3 h/.test(last()) && /💵 REAL/.test(last()) && /📅 Today \+\$\d+\.\d\d \(best \+\$\d+\.\d\d\) · (stops if (down|it falls below)|no day limits)/.test(last()) && /Best 15-min practice rule: .+ over \d+ trades/.test(last()) && /Weather\/sports practice: [+−]\$/.test(last()), 'one 3-hourly update carries the real record, today, the rule followed and practice totals', last());
+  await send('/set clean 0'); await send('/set daystop 0.15'); await send('/set latelive 0'); await wait(200);
+
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

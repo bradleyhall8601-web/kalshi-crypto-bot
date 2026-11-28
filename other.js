@@ -75,7 +75,7 @@ function teamMatch(km, c) {
 }
 
 function create(deps) {
-  const { kalshi, req, log, say, feeTotal, money, cents, cfg, save, realBuy, quote } = deps;
+  const { kalshi, req, log, say, feeTotal, money, cents, cfg, save, realBuy, quote } = deps, sayP = deps.sayP || say; // sayP: practice news (left out of a clean Telegram)
   const now = () => (deps.now ? deps.now() : Date.now());
   const O = { r: {}, p: [], live: { n: 0, w: 0, sum: 0, pos: [] }, e: {} };
   for (const x of RULES) O.r[x.k] = { n: 0, w: 0, sum: 0, b: [0, 0, 0, 0] };
@@ -247,7 +247,7 @@ function create(deps) {
       lines.push(line + ' · ✔️ checked twice'); log('OTHER PAPER', x.k, x.m.ticker, x.side, ask, 'p', c.q.toFixed(3));
       if (liveOn(x.k) && realBuy) { try { const r = await realBuy(x.m, x.side, ask, RULES.find(y => y.k === x.k).name); if (r && r.n > 0) { O.live.pos.push({ k: x.k, t: x.m.ticker, ev: x.ev, side: x.side, px: r.px, n: r.n, cost: r.cost, c: x.c }); real++; } } catch (e) { log('OTHER LIVE failed', x.m.ticker, e.message); } }
     }
-    if (lines.length) { await say(`🧪 PRACTICE BETS (weather/sports)\n${lines.join('\n')}\n${real ? `💵 Real money on ${real} of them (practice made +$${goal()} and that rule is in profit)` : `📄 Paper only — real money starts once practice makes +$${goal()} (now ${total() >= 0 ? '+' : '−'}${money(Math.abs(total()))})`}`); await save(); }
+    if (lines.length) { await (real ? say : sayP)(`🧪 PRACTICE BETS (weather/sports)\n${lines.join('\n')}\n${real ? `💵 Real money on ${real} of them (practice made +$${goal()} and that rule is in profit)` : `📄 Paper only — real money starts once practice makes +$${goal()} (now ${total() >= 0 ? '+' : '−'}${money(Math.abs(total()))})`}`); await save(); }
     if (force || now() - mem.gradeAt >= 5 * 60e3) { mem.gradeAt = now(); await grade().catch(e => log('OTHER grade failed', e.message)); }
   }
   const payoutYes = m => { const r = String(m.result || '').toLowerCase(); if (r === 'yes') return 1; if (r === 'no') return 0; const st = String(m.status || '').toLowerCase(); const sv = num(m.settlement_value_dollars); return /settled|finalized/.test(st) && sv >= 0 && sv <= 1 ? sv : NaN; }; // a tied game pays 50¢ each
@@ -288,7 +288,7 @@ function create(deps) {
     const isOn = RULES.filter(x => liveOn(x.k)).map(x => x.k);
     if (isOn.join() !== wasOn) notes.push(isOn.length ? `🎉 Practice is up ${money(total())} (goal +$${goal()}). REAL money now follows: ${isOn.map(k => RULES.find(x => x.k === k).name).join(', ')}${RULES.length > isOn.length ? `. Still practicing (not in profit yet): ${RULES.filter(x => !isOn.includes(x.k)).map(x => x.name).join(', ')}` : ''}.` : `↩️ Weather/sports real money paused: practice is ${total() >= 0 ? '+' : '−'}${money(Math.abs(total()))} (needs +$${goal()} with the rule itself in profit). Back to practice only.`);
     if (changed) await save();
-    if (lines.length || notes.length) await say(`📄 PRACTICE RESULTS (weather/sports)${lines.length ? '\n' + lines.join('\n') : ''}\n${recLines()}${notes.length ? '\n\n' + notes.join('\n') : ''}`);
+    if (lines.length || notes.length) await (notes.length ? say : sayP)(`📄 PRACTICE RESULTS (weather/sports)${lines.length ? '\n' + lines.join('\n') : ''}\n${recLines()}${notes.length ? '\n\n' + notes.join('\n') : ''}`);
   }
   const recLine = x => { const R = O.r[x.k], avg = R.n ? R.sum / R.n : 0, open = O.p.filter(o => o.k === x.k).length;
     return `${x.icon} ${x.name}: ${R.n} trades · ${R.w}W·${R.n - R.w}L · ${R.sum >= 0 ? '+' : '−'}${money(Math.abs(R.sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract) · ${open} open${liveOn(x.k) ? ' · 💵 REAL' : ''}`; };

@@ -49,7 +49,7 @@ W.settlements = [
     { ticker: 'KXBTCD-NEW2-T60500', settled_time: new Date(Date.now() + 2000).toISOString(), market_result: 'yes', revenue: 100, yes_total_cost: 90, no_total_cost: 0, fee_cost: '0.01' });
   const mr = msgs().length; await wait(21000); await send('/scan'); await wait(2500);
   const rs = msgs().slice(mr).filter(m => /🧾 RESULTS|🏆 WIN|💔 LOSS/.test(m));
-  ok(rs.length === 1 && /🧾 RESULTS · 1W·1L/.test(rs[0]) && /💔 LOSS/.test(rs[0]) && /🏆 WIN/.test(rs[0]) && /📊 Today/.test(rs[0]), 'settlements that arrive together come as ONE results message', JSON.stringify(rs));
+  ok(rs.length === 1 && /🧾 RESULTS · 1W·1L/.test(rs[0]) && /💔 LOSS/.test(rs[0]) && /🏆 WIN/.test(rs[0]) && /📊 Account today/.test(rs[0]), 'settlements that arrive together come as ONE results message', JSON.stringify(rs));
   W.settlements.push({ ticker: 'KXSOLD-NEW3-T70', settled_time: new Date(Date.now() + 1000).toISOString(), market_result: 'yes', revenue: 100, yes_total_cost: 80, no_total_cost: 0, fee_cost: '0.01' });
   const mr2 = msgs().length; await send('/_acct2'); await wait(2500);
   const rs2 = msgs().slice(mr2).filter(m => /KXSOLD-NEW3|SOL/.test(m) && /WIN/.test(m));
