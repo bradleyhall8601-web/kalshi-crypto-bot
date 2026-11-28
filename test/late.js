@@ -452,6 +452,15 @@ W.shards = { 0: 0.66, 2: 0 };
   await send('/paper'); await wait(400);
   ok(/📅 Today \+\$2\.50 \(best \+\$5\.20\) · 🔒 profit locked until midnight/.test(last()), '/paper shows the day and the lock', last());
   delete W.markets[lm17.ticker];
+  await send('/set lockkeep 0'); await wait(200); // live 11/27 7:03 PM: the lock message says this turns it off, but a lock already hit stayed on
+  const r17u = W.orders.length, um = market('KXSOL15M', 2.9, 0.85);
+  await send('/_fasttick'); await wait(4000);
+  ok(W.orders.slice(r17u).some(o => o.ticker === um.ticker), '/set lockkeep 0 releases a lock already hit today: real buys back on');
+  await send('/paper'); await wait(400);
+  ok(/📅 Today/.test(last()) && !/profit locked/.test(last()), '/paper no longer says locked', last());
+  delete W.markets[um.ticker]; await send('/set lockkeep 0.5'); await wait(200);
+  await send('/paper'); await wait(400);
+  ok(/🔒 profit locked until midnight/.test(last()), 'setting it back to 0.5 the same day: still locked for today', last());
   await send('/_dayold'); await send('/_daycheck');
   const r17b = W.orders.length, nd = market('KXBNB15M', 2.9, 0.80);
   await send('/_fasttick'); await wait(4000);

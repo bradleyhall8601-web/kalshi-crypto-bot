@@ -860,7 +860,7 @@ const lateBlob = (keep = 30) => { const L = lateState(); return { v: Object.from
 const lateRec = k => { const V = lateState().v[k], n = V.n, sum = V.sum, w = V.w; return { n, sum, w, avg: n ? sum / n : 0 }; };
 const LATE_WINDOWS = 50, LATE_PASS = 0.02; // verdict after 50 graded windows: passes at +2¢/contract or better
 const lateLine = x => { const { n, sum, w, avg } = lateRec(x.k), nw = lateState().v[x.k].nw; return `⏰ ${x.name} test: ${n} trades · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract) · ${Math.min(nw, LATE_WINDOWS)}/${LATE_WINDOWS} windows`; };
-const liveLine = () => { const LV = lateState().live, on = [lateName(lateChamp()), ...LATE_VARIANTS.filter(x => x.slow && lateState().v[x.k].verdict === 'pass').map(x => x.name)].join(' + '); return `💵 REAL ${on} (all coins): ${CFG.LATE_LIVE === 1 ? 'ON' : LV.stopped ? 'STOPPED' : 'OFF'} · ${LV.n} trades · ${LV.w}W·${LV.n - LV.w}L · ${LV.sum >= 0 ? '+' : '−'}${money(Math.abs(LV.sum))} · ${CFG.LATE_STOP >= 10000 ? 'no loss limit' : `stops at −${money(CFG.LATE_STOP)}`} · ${LV.pos.length} open` + (() => { const D = lateDay(), t = (LV.sum || 0) - D.s0; return `\n📅 Today ${t >= 0 ? '+' : '−'}${money(Math.abs(t))} (best +${money(D.pk || 0)})${D.off === 'lock' ? ' · 🔒 profit locked until midnight' : D.off === 'loss' ? ' · 🛑 day loss limit hit, back at midnight' : ` · stops at −${money(lateDayLoss())} or below ${Math.round(CFG.LOCK_KEEP * 100)}% of the day's best once it's up ${money(CFG.LOCK_MIN)}`}`; })(); };
+const liveLine = () => { const LV = lateState().live, on = [lateName(lateChamp()), ...LATE_VARIANTS.filter(x => x.slow && lateState().v[x.k].verdict === 'pass').map(x => x.name)].join(' + '); return `💵 REAL ${on} (all coins): ${CFG.LATE_LIVE === 1 ? 'ON' : LV.stopped ? 'STOPPED' : 'OFF'} · ${LV.n} trades · ${LV.w}W·${LV.n - LV.w}L · ${LV.sum >= 0 ? '+' : '−'}${money(Math.abs(LV.sum))} · ${CFG.LATE_STOP >= 10000 ? 'no loss limit' : `stops at −${money(CFG.LATE_STOP)}`} · ${LV.pos.length} open` + (() => { const D = lateDay(), off = dayOff(), t = (LV.sum || 0) - D.s0; return `\n📅 Today ${t >= 0 ? '+' : '−'}${money(Math.abs(t))} (best +${money(D.pk || 0)})${off === 'lock' ? ' · 🔒 profit locked until midnight' : off === 'loss' ? ' · 🛑 day loss limit hit, back at midnight' : ` · stops at −${money(lateDayLoss())} or below ${Math.round(CFG.LOCK_KEEP * 100)}% of the day's best once it's up ${money(CFG.LOCK_MIN)}`}`; })(); };
 // self-learning switch (Brad 11/25): real 15-min money follows whichever rule has proven itself best lately; with none proven it stays on the plain 12th-minute rule (Brad: keep money on)
 const LATE_FAST = () => [{ k: 'm12', name: '12th-minute' }, { k: 'm125', name: '12½-minute' }, { k: 'm12b', name: '12th-min · bid 2¢ under' }, { k: 'm12x', name: '12th-min · sell early if it flips' }, ...LATE_FILTERS.map(F => ({ k: F.k, name: F.name, F }))]; // bid / sell-early: real resting bids and real selling built 11/25 evening (Brad: "Do what's needed"); like the others they only get real money after proving themselves
 const lateRecOf = k => { const L = lateState(); return L.v[k] || L.f[k]; };
@@ -882,6 +882,7 @@ function lateSize(f) { if (!lateOk(lateChamp())) return { mult: 1, per: CFG.LATE
 // biggest fee) and US mornings, 6–10 AM CT on US weekdays (−10.8¢: data releases and the stock open flip late leaders). Paper tests still take them.
 const ctHour = () => S.testHour !== undefined ? S.testHour : Number(new Intl.DateTimeFormat('en-US', { timeZone: CFG.TZ, hour: '2-digit', hourCycle: 'h23' }).format(new Date()));
 const usMorning = () => !(env.BOT_TEST === '1' && S.testHour === undefined) && (S.testDataDay !== undefined ? S.testDataDay : news.usDataDay()) && ctHour() >= 6 && ctHour() < 10; // tests set the clock themselves
+const dayOff = () => { const o = lateDay().off; return (o === 'lock' && CFG.LOCK_KEEP > 0) || (o === 'loss' && CFG.DAY_LOSS_PCT > 0) ? o : null; }; // /set lockkeep 0 (or daystop 0) releases a limit already hit today, as its message says (live 11/27 7:03 PM: the lock stayed on whatever the setting)
 function lateDay() { const LV = lateState().live, k = String(startOfTodayCT()); if (!LV.day || LV.day.k !== k) LV.day = { k, s0: LV.sum || 0, pk: 0 }; return LV.day; } // real 15-min money's day: start, best, and whether a day limit stopped it
 const lateDayLoss = () => Math.max(2, CFG.DAY_LOSS_PCT * (S.led.startCash > 0 ? S.led.startCash : 15));
 function lateDayCheck() { // after real results: 🛑 day loss limit, or 🔒 profit lock once it gives back too much of the day's best. Never stops a winning run.
@@ -893,7 +894,7 @@ function lateDayCheck() { // after real results: 🛑 day loss limit, or 🔒 pr
 }
 function lateLiveSkip(m, px) {
   if (!isFast(String(m.ticker).split('-')[0])) return null;
-  const off = lateDay().off;
+  const off = dayOff();
   const why = off ? (off === 'lock' ? 'profit locked for today' : 'day loss limit hit') : px < CFG.LATE_MIN ? `leader under ${cents(CFG.LATE_MIN)}` : CFG.LATE_AM === 1 && usMorning() ? 'US morning (6–10 AM CT)' : null;
   if (why) log('LATE LIVE skip', m.ticker, px, why);
   return why;
