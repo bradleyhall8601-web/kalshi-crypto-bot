@@ -144,8 +144,8 @@ function settingsText() { return Object.entries(SETTINGS).map(([n, x]) => `${n} 
 let saveChain = Promise.resolve();
 function saveSettings() { saveChain = saveChain.then(saveSettingsNow, saveSettingsNow); return saveChain; }
 async function saveSettingsNow() {
-  if (!OWNER) return;
-  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 24; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, tot: S.paper.tot, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); blob.OT = OT.blob(); // stories already paused for survive restarts; weather/sports practice records
+  if (!OWNER || !S.settingsReady || S.standby) return; // never overwrite saved records with defaults, or from a copy that has been replaced
+  const blob = {}; for (const x of Object.values(SETTINGS)) blob[x.key] = CFG[x.key]; blob.SERIES = CFG.SERIES; blob.manualLock = S.manualLock; blob.paused = S.paused; blob.v = 24; blob.OWNER = { id: BOOT.id, at: BOOT.at }; blob.REST = S.rest; blob.PAPERS = { r: S.paper.r, tot: S.paper.tot, pos: S.paper.pos, bids: S.paper.bids, since: S.paper.since, old: S.paper.old, late: lateBlob() }; blob.LANES = S.lanes; blob.CALFIT = S.cal; blob.SC = S.sc; blob.LED = S.led; blob.SETL = S.setlTs; blob.LRN = S.learn; blob.NPS = (S.pauseStories || []).slice(-30); blob.OT = OT.blob(); // stories already paused for survive restarts; weather/sports practice records
   let text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob);
   if (text.length > 4000) { S.sc.open = S.sc.open.slice(-8); blob.SC = S.sc; text = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify(blob); }
   if (text.length > 4000) text = '⚙️ BOT SETTINGS (do not unpin)\nZ:' + zlib.deflateRawSync(Buffer.from(JSON.stringify(blob)), { level: 9 }).toString('base64'); // many coins: compress to fit Telegram's 4096 limit
@@ -165,11 +165,17 @@ async function saveSettingsNow() {
   const r = await tg('sendMessage', { chat_id: OWNER, text, disable_notification: true });
   if (r.ok) { pinnedId = r.result.message_id; await tg('pinChatMessage', { chat_id: OWNER, message_id: pinnedId, disable_notification: true }); }
 }
+function settingsRetry(why) { // Telegram unreadable or the saved settings unreadable: no new positions, no saves, try again every 30 s
+  S.settingsReady = false; log('SETTINGS NOT LOADED', why, '— no new positions until they load');
+  if (!S.settingsWarned) { S.settingsWarned = 1; say(`⚠️ Couldn't load my saved settings (${why}). No new real bets until they load — retrying every 30 s.`); }
+  setTimeout(() => loadSettings().catch(e => settingsRetry(e.message)), env.BOT_TEST === '1' ? 1000 : 30e3);
+}
 async function loadSettings() {
-  if (!OWNER) return;
+  if (!OWNER) { S.settingsReady = true; return; }
   const r = await tg('getChat', { chat_id: OWNER });
-  const pm = r.ok && r.result.pinned_message;
-  if (!pm || !String(pm.text || '').startsWith('⚙️ BOT SETTINGS')) return;
+  if (!r.ok) return settingsRetry('Telegram could not be read');
+  const pm = r.result.pinned_message;
+  if (!pm || !String(pm.text || '').startsWith('⚙️ BOT SETTINGS')) { if (!S.settingsReady) log('SETTINGS none saved yet — starting fresh'); S.settingsReady = true; return; }
   try {
     const zi = pm.text.indexOf('\nZ:');
     const blob = zi >= 0 ? JSON.parse(zlib.inflateRawSync(Buffer.from(pm.text.slice(zi + 3).trim(), 'base64')).toString()) : JSON.parse(pm.text.slice(pm.text.indexOf('{')));
@@ -219,7 +225,8 @@ async function loadSettings() {
     if (S.led.fastOff) { S.led.fastOff = false; S.led.safe = true; setTimeout(() => { saveSettings(); say('🛡 Loss stop switched to SAFE MODE: trading again now — 1 contract at a time, only 5¢+ edges, no always-in. Back to normal size at midnight CT.'); }, 3000); }
     S.manualLock = !!blob.manualLock; S.paused = !!blob.paused; pinnedId = pm.message_id;
     log('settings loaded', JSON.stringify(blob));
-  } catch (e) { log('settings parse error', e.message); }
+    const was = S.settingsWarned; S.settingsReady = true; if (was) { S.settingsWarned = 0; say('✅ Saved settings loaded — real bets back on.'); setTimeout(() => saveSettings().catch(() => {}), 500); } // mark this copy as the active one
+  } catch (e) { log('settings parse error', e.message); return settingsRetry('the saved settings could not be read'); }
 }
 let scanTimer = null;
 function schedule() { if (scanTimer) clearInterval(scanTimer); if (env.BOT_TEST !== '1') scanTimer = setInterval(() => tick(false), CFG.SCAN_EVERY_MIN * 60e3); }
@@ -258,14 +265,16 @@ process.on('uncaughtException', e => log('uncaught', e.stack || e.message));
 process.on('unhandledRejection', e => log('unhandled', (e && e.stack) || e));
 
 // ---------- helpers ----------
+const REQ_TIMEOUT_MS = 15000; // every Kalshi/Telegram/data call gives up after 15 s instead of hanging
 async function req(url, { method = 'GET', headers = {}, body, raw = false } = {}) {
-  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json', ...headers }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json', ...headers }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(REQ_TIMEOUT_MS) }); // 11/27 10:16 PM: a request with no time limit hung the bot for 2 min (watchdog restart)
   const t = await r.text();
   if (!r.ok) throw new Error(`${method} ${url.split('?')[0].replace(/\/bot[^/]+/, '/bot***')} -> ${r.status}: ${t.slice(0, 300)}`);
   if (raw) return t;
   return t ? JSON.parse(t) : {};
 }
 async function kalshi(method, path, body, tries = 0) {
+  if (method === 'POST' && /\/orders/.test(path) && !(body && body.reduce_only)) { const why = orderBlock(); if (why) throw new Error(`order blocked: ${why}`); } // no new exposure until settings are loaded, or once a newer copy of the bot runs (closing a position is always allowed)
   try { return await kalshiOnce(method, path, body); }
   catch (e) { if (/-> 429/.test(e.message) && tries < 4) { await new Promise(r => setTimeout(r, 1000 * (tries + 1))); return kalshi(method, path, body, tries + 1); } throw e; }
 }
@@ -288,7 +297,7 @@ async function tg(method, payload, tries = 0) {
   }
 }
 // every Telegram report is also written to the server log (one line), so a log review sees exactly what Brad saw
-const say = (text, extra = {}) => { if (!OWNER) return null; log('TG', String(text).replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 600)); return tg('sendMessage', { chat_id: OWNER, text, ...extra }); };
+const say = (text, extra = {}) => { if (!OWNER) return null; if (S.standby) { log('TG (standby, not sent)', String(text).replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 300)); return Promise.resolve({ ok: false }); } log('TG', String(text).replace(/\s*\n\s*/g, ' ⏎ ').slice(0, 600)); return tg('sendMessage', { chat_id: OWNER, text, ...extra }); };
 const num = v => (v === undefined || v === null || v === '') ? NaN : Number(v);
 const d = (o, k) => {
   const a = num(o[k + '_dollars']); if (a === a) return a;
@@ -296,6 +305,21 @@ const d = (o, k) => {
   const v = o[k]; const b = num(v); if (!(b === b)) return NaN;
   return typeof v === 'string' && v.includes('.') ? b : b / 100; // "0.0068" = dollars, 68 = cents
 };
+// 11/27 investigation: safe start + one active copy. The bot only opens new positions once its saved settings are loaded (if Telegram can't be read at boot it
+// used to run on code defaults — model bids on real money, 60¢ floor — and then pin a fresh settings message), and a copy stands down once a newer copy
+// has started (Render keeps the old copy running ~60 s after a deploy goes live; both traded and messaged)
+const BOOT = { id: crypto.randomUUID().slice(0, 8), at: Date.now() };
+const orderBlock = () => !S.settingsReady ? 'settings not loaded yet' : S.standby ? 'a newer copy of the bot is running' : null;
+function parsePinned(text) { const t = String(text || ''); if (!t.startsWith('⚙️ BOT SETTINGS')) return null; const zi = t.indexOf('\nZ:'); return zi >= 0 ? JSON.parse(zlib.inflateRawSync(Buffer.from(t.slice(zi + 3).trim(), 'base64')).toString()) : JSON.parse(t.slice(t.indexOf('{'))); }
+async function leaseCheck() { // a newer copy wrote its start time into the pinned settings: this copy stops trading, saving and messaging
+  if (S.standby || !OWNER || !S.settingsReady) return;
+  const r = await tg('getChat', { chat_id: OWNER }); if (!r.ok) return; // can't tell: keep going (the other guards still apply)
+  let b = null; try { b = parsePinned(r.result.pinned_message && r.result.pinned_message.text); } catch (e) { return; }
+  const o = b && b.OWNER; if (!o || o.id === BOOT.id) return;
+  if (Number(o.at) > BOOT.at) { S.standby = true; log('STANDBY', 'newer copy', o.id, 'started', new Date(Number(o.at)).toISOString(), '— this copy', BOOT.id, 'stops trading, saving and messaging'); }
+  else saveSettings().catch(() => {}); // an older copy overwrote the owner mark: take it back
+}
+process.on('SIGTERM', () => { S.standby = true; log('SIGTERM', BOOT.id, '— standing down'); setTimeout(() => process.exit(0), 1500); }); // Render's shutdown signal (60 s after the new copy is live)
 const cnt = (o, k = 'count') => { const a = num(o[k + '_fp']); return a === a ? a : (num(o[k]) || 0); };
 const feeTotal = (c, p) => Math.ceil(0.07 * c * p * (1 - p) * 100 - 1e-9) / 100;
 const money = x => !isFinite(x) ? 'no limit' : (Number(x) < -0.004 ? '−$' : '$') + Math.abs(Number(x)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -452,6 +476,19 @@ function bestLimit(p, ask, need, grace = 0.01) {
   while (limit > floor && limit + feePer(limit) > p - need) limit = Math.round((limit - 0.01) * 100) / 100;
   return limit;
 }
+// a failed buy: say exactly what Kalshi told us (11/27 investigation: a timeout or dropped reply was reported as "no money spent" without checking)
+const buyFailText = (name, e) => /outcome unknown/.test(e.message) ? `⚠️ Real ${name} buy: Kalshi didn't answer and no fill showed up after checking twice — not retried. If it did fill, the results message will show it.`
+  : /order blocked/.test(e.message) ? `⏸ Real ${name} buy skipped: ${e.message.replace(/^.*order blocked: /, '')}.` : `⚠️ Real ${name} buy failed: ${String(e.message).replace(/^.*?-> /, '').slice(0, 200)} — no money spent on this one.`;
+async function orderReconcile(ticker, side, sinceSec) { // no clear answer to an order: read Kalshi's fills for this market (the bot never holds another position in it) before deciding anything
+  for (const ms of env.BOT_TEST === '1' ? [300, 600] : [3000, 6000]) { // allow for Kalshi's read delay
+    await new Promise(r => setTimeout(r, ms));
+    let fs = []; try { fs = (await pageAll(`/portfolio/fills?ticker=${ticker}&min_ts=${sinceSec}`, 'fills')).filter(f => (f.ticker || f.market_ticker) === ticker && !(Number(f.ts) < sinceSec)); } catch (e) { continue; }
+    const n = fs.reduce((a, f) => a + cnt(f), 0); if (!(n > 0)) continue;
+    const px = fs.reduce((a, f) => a + cnt(f) * Number(side === 'yes' ? f.yes_price_dollars : f.no_price_dollars), 0) / n, fee = fs.reduce((a, f) => a + (Number(f.fee_cost) || 0), 0);
+    return { order_id: 'reconciled', fill_count: n.toFixed(2), remaining_count: '0.00', average_fill_price: (side === 'yes' ? px : 1 - px).toFixed(4), average_fee_paid: (fee / n).toFixed(4), reconciled: true };
+  }
+  return null;
+}
 async function placeBuy({ ticker, side, count, price, auto = false, fund = 0 }) {
   const m = (await kalshi('GET', `/markets/${ticker}`)).market || {};
   const idx = Number.isInteger(m.exchange_index) ? m.exchange_index : 0;
@@ -464,7 +501,15 @@ async function placeBuy({ ticker, side, count, price, auto = false, fund = 0 }) 
     time_in_force: 'immediate_or_cancel', self_trade_prevention_type: 'taker_at_cross',
     client_order_id: 'kbot-' + crypto.randomUUID(), exchange_index: idx,
   };
-  const o = await kalshi('POST', '/portfolio/events/orders', body);
+  const t0 = Math.floor(Date.now() / 1000) - 2; let o;
+  try { o = await kalshi('POST', '/portfolio/events/orders', body); }
+  catch (e) {
+    if (/order blocked/.test(e.message) || (/-> 4\d\d/.test(e.message) && !/-> 408/.test(e.message))) throw e; // a clear rejection: nothing was bought
+    log('ORDER UNKNOWN', body.client_order_id, ticker, e.message); // timeout, 5xx or dropped connection: Kalshi may have filled it (docs: don't assume either way)
+    o = await orderReconcile(ticker, side, t0); acctCache = null;
+    if (!o) throw new Error(`order outcome unknown (${String(e.message).slice(0, 80)}) and no fill found on Kalshi`);
+    log('ORDER RECONCILED', body.client_order_id, JSON.stringify(o));
+  }
   log('ORDER', JSON.stringify(body), '->', JSON.stringify(o));
   acctCache = null;
   const filled = num(o.fill_count) || 0;
@@ -1044,7 +1089,7 @@ async function lateEntry(m, mins, k, cond) {
       const X = L.v.m12x; if (!X.pos.some(y => y.ev === m.event_ticker)) X.pos = X.pos.concat([{ t: m.ticker, ev: m.event_ticker, side, px, c: o.c, at: Date.now() }]).slice(-80); } // the "sell early" twin
     V.pos = V.pos.concat([o]).slice(-80);
     log('LATE', x.k, m.ticker, side, px, `${mins.toFixed(1)} min left`, o.f !== undefined ? `filters ${o.f & 1 ? 'M' : '-'}${o.f & 2 ? 'C' : '-'}${o.f & 4 ? 'N' : '-'}` : '');
-    const fail = e => { log('LATE LIVE failed', m.ticker, e.message); return say(`⚠️ Real ${x.name} buy failed: ${String(e.message).replace(/^.*?-> /, '').slice(0, 200)} — no money spent on this one.`); };
+    const fail = e => { log('LATE LIVE failed', m.ticker, e.message); return say(buyFailText(x.name, e)); };
     if (x.slow) { if (V.verdict === 'pass') await lateLive(m, side, px, x.name).catch(fail); } // hourly/daily: real money once their own test passed
     else if (x.k === champ) await lateLive(m, side, px, x.name, lateSize(o.f)).catch(fail); // the 15-min rule real money follows right now
     else if (x.k === 'm12' && champ === 'm12x') await lateLive(m, side, px, lateName('m12x'), { ...lateSize(o.f), exit: true }).catch(fail); // same buy, then sold early if it flips (lateExitCheck)
@@ -1162,7 +1207,7 @@ async function flushLiveCand() {
   for (const x of c) { const g = Date.parse(x.m.close_time) + '|' + x.side; (by[g] = by[g] || []).push(x); }
   for (const [g, xs] of Object.entries(by)) {
     const [cl, sd] = g.split('|'), have = LV.pos.filter(o => o.c === +cl && o.side === sd).length;
-    for (const x of xs.sort((p, q) => q.px - p.px).slice(0, Math.max(0, 2 - have))) await lateLive(x.m, x.side, x.px, x.name, lateSize(x.f)).catch(e => { log('LATE LIVE failed', x.m.ticker, e.message); return say(`⚠️ Real ${x.name} buy failed: ${String(e.message).replace(/^.*?-> /, '').slice(0, 200)} — no money spent on this one.`); });
+    for (const x of xs.sort((p, q) => q.px - p.px).slice(0, Math.max(0, 2 - have))) await lateLive(x.m, x.side, x.px, x.name, lateSize(x.f)).catch(e => { log('LATE LIVE failed', x.m.ticker, e.message); return say(buyFailText(x.name, e)); });
   }
 }
 // hourly/daily ladders: pin the strike nearest the price as the hour (or day) opens, then at 12 min left buy whichever side of it is winning
@@ -1738,7 +1783,10 @@ async function onUpdate(u) {
   if (env.BOT_TEST === '1' && t === '/_livereset') { lateState().live = {}; lateState(); return; } // tests: fresh real record
   if (env.BOT_TEST === '1' && t.startsWith('/_livesum ')) { lateState().live.sum = Number(t.split(/\s+/)[1]); return; } // tests: real record total
   if (env.BOT_TEST === '1' && t === '/_daycheck') { const x = lateDayCheck(); if (x) await say(x); return; }
-  if (env.BOT_TEST === '1' && t === '/_practice') return say(practiceUpdate()); // tests: the 3-hourly update now
+  if (env.BOT_TEST === '1' && t === '/_practice') return say(practiceUpdate());
+  if (env.BOT_TEST === '1' && /^\/_ready [01]$/.test(t)) { S.settingsReady = t.endsWith('1'); return; } // tests: settings loaded or not
+  if (env.BOT_TEST === '1' && t === '/_lease') return leaseCheck(); // tests: check for a newer copy now
+  if (env.BOT_TEST === '1' && t === '/_unstandby') { S.standby = false; return; } // tests: the 3-hourly update now
   if (env.BOT_TEST === '1' && t === '/_dayold') { lateDay().k = '1'; return; } // tests: pretend the day changed
   if (env.BOT_TEST === '1' && t === '/_acct2') { acctCache = null; await Promise.all([account(true), account(true)]); return; } // tests: two scans read the account at the same moment
   if (env.BOT_TEST === '1' && t === '/_lateage') { const L = lateState(), all = [...Object.values(L.v).flatMap(V => V.pos), ...L.live.pos]; if (all.length) { const dt = Date.now() - 4 * 60e3 - Math.max(...all.map(o => o.c)); for (const o of all) o.c += dt; } return; } // tests: every open window closed 4 min ago (windows keep their own close times)
@@ -1788,7 +1836,7 @@ async function onUpdate(u) {
   if (t.startsWith('/bids')) { const r = Object.values(S.rest || {}); return say(r.length ? `📋 Resting limit bids (${money(restingCost())} reserved):\n` + r.map(o => `• ${label(o.t)} ${o.side.toUpperCase()} ${o.n} @ ${cents(o.q)} · win chance ${Math.round(o.p * 100)}%${o.filled ? ` · ${o.filled} filled` : ''}`).join('\n') : `📋 No resting bids right now. Limit bids: ${CFG.MAKER === 1 ? 'ON' : 'OFF (/set maker 1)'}`); }
   if (t.startsWith('/settings')) return say('⚙️ Current settings\n' + settingsText() + '\n\nChange one: /set trade 3\nCoins: /set coins all  (or btc,eth,sol,…)');
   if (t.startsWith('/help')) return say('Commands\n/claude <anything> – talk to Claude (or just type)\n/status – money & mode\n/stats – is the bot predicting well?\n/settings – see all settings\n/set <name> <value> – change one live\n/scan – scan right now\n/pause /resume\n/lock – stay in confirm mode\n/auto – allow auto-trading\n/auto15 on|off – auto-trade 15-min markets\n/why – why it is or is not trading 15-min markets now\n/report – today: trades, wins, losses, P&L\n/realstats [days] – real 15-min results by price, coin, time and size\n/news – market-moving headlines + pauses\n/research – what the self-test learned\n/coins – which coins & markets are live\n/learn – self-learning results per market\n/bids – resting limit bids\n/paper – practice-trading record\n/rollback – undo the last code change\n\nSettings you can change:\n' + Object.entries(SETTINGS).map(([n, x]) => `${n} – ${x.desc}`).join('\n') + '\ncoins – btc,eth,sol,xrp,doge,bnb,hype,near,zec (or all)');
-  if (t.startsWith('/set')) { const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
+  if (t.startsWith('/set')) { if (!S.settingsReady) return say('⏳ My saved settings haven\'t loaded yet — send that again in a minute so it isn\'t lost.'); const [, name, raw] = t.split(/\s+/); return say(await applySetting(name, raw)); }
   if (t.startsWith('/rollback')) return rollback();
   if (t.startsWith('/claude') || !t.startsWith('/')) {
     const q = msg.text.replace(/^\/claude(@\w+)?\s*/i, '').trim();
@@ -1827,6 +1875,8 @@ http.createServer((rq, rs) => {
     { command: 'lock', description: 'Stay in confirm mode' }, { command: 'auto', description: 'Allow auto-trading' }, { command: 'auto15', description: 'Auto 15-min trading on/off' }, { command: 'report', description: 'Today: trades, wins, losses, P&L' }, { command: 'news', description: 'Market-moving news + pauses' }, { command: 'research', description: 'What the self-test learned' }, { command: 'coins', description: 'Which coins/markets are live' }, { command: 'learn', description: 'Self-learning results per market' }, { command: 'bids', description: 'Resting limit bids' }, { command: 'paper', description: 'Practice-trading record' }, { command: 'why', description: 'Why it is/isn\'t trading 15-min now' }, { command: 'rollback', description: 'Undo last code change' },
     { command: 'help', description: 'All commands' }] });
   await loadSettings(); schedule();
+  if (S.settingsReady) saveSettings().catch(() => {}); // mark this copy as the active one
+  if (env.BOT_TEST !== '1') setInterval(() => leaseCheck().catch(() => {}), 15e3);
   try { const me = await tg('getMe', {}); log('SELFCHECK telegram', me.ok ? 'OK @' + me.result.username : 'FAILED'); } catch (e) { log('SELFCHECK telegram FAILED', e.message); }
   try { const b = await kalshi('GET', '/portfolio/balance'); log('SELFCHECK kalshi OK balance', JSON.stringify(b)); }
   catch (e) {

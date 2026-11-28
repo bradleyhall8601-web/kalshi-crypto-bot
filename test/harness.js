@@ -42,6 +42,7 @@ global.fetch = async (url, o = {}) => {
   if (u.includes('api.telegram.org')) {
     const method = u.split('/').pop();
     W.tg.push({ method, body: b });
+    if (method === 'getChat' && W.chatFail > 0) { W.chatFail--; return J({ ok: false, description: 'Internal Server Error' }, 500); } // tests: Telegram down at boot
     if (method === 'getChat') return J({ ok: true, result: W.pinned ? { pinned_message: { message_id: W.pinnedId, text: W.pinned } } : {} });
     if (method === 'editMessageText' && b.message_id === W.pinnedId) { if (W.pinned === b.text) return J({ ok: false, description: 'Bad Request: message is not modified' }, 400); W.pinned = b.text; }
     if (method === 'sendMessage' && String(b.text).startsWith('⚙️ BOT SETTINGS')) { W.pinned = b.text; W.pinnedId = ++W.msgId; W.settingsSends = (W.settingsSends || 0) + 1; return J({ ok: true, result: { message_id: W.pinnedId } }); }
@@ -173,6 +174,7 @@ global.fetch = async (url, o = {}) => {
       W.shards[idx] -= count * pay + fee;
       W.fills.push({ ticker: b.ticker, side: 'yes', action: b.side === 'bid' ? 'buy' : 'sell', count_fp: count.toFixed(2), yes_price_dollars: fillYes.toFixed(4), no_price_dollars: (1 - fillYes).toFixed(4), fee_cost: fee.toFixed(4) });
       W.positions.push({ ticker: b.ticker, position: b.side === 'bid' ? count : -count, market_exposure_dollars: (count * pay).toFixed(4) });
+      if (W.lostReply && W.lostReply[b.ticker]) { delete W.lostReply[b.ticker]; return J({ error: { code: 'service_unavailable' } }, 503); } // tests: the order filled but the reply was lost
       return J({ order_id: 'o' + W.orders.length, fill_count: count.toFixed(2), remaining_count: '0.00', average_fill_price: fillYes.toFixed(4), average_fee_paid: (fee / count).toFixed(4), ts_ms: 1 }, 201);
     }
     const ob = path.match(/\/markets\/([^/]+)\/orderbook$/);

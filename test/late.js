@@ -499,6 +499,29 @@ W.shards = { 0: 0.66, 2: 0 };
   delete W.markets[fb19.ticker];
 
 
+  console.log('\n20. Reliability (11/27 investigation): lost order reply, settings not loaded, a newer copy running');
+  for (const k of Object.keys(W.markets)) if (W.markets[k].status === 'open') delete W.markets[k];
+  await send('/_livereset'); await send('/_champ m12'); await send('/set latelive 1'); await send('/set daystop 0'); await wait(300);
+  const r20 = W.orders.length, c20 = msgs().length, lr = market('KXSOL15M', 2.9, 0.85); W.lostReply = { [lr.ticker]: 1 };
+  await send('/_fasttick'); await wait(5000);
+  ok(W.orders.slice(r20).filter(o => o.ticker === lr.ticker).length === 1, 'order filled but the reply was lost: checked Kalshi, no second order', JSON.stringify(W.orders.slice(r20).map(o => o.ticker)));
+  await until(() => ((pinned().PAPERS.late.live || {}).pos || []).some(o => o.t === lr.ticker));
+  ok(((pinned().PAPERS.late.live || {}).pos || []).some(o => o.t === lr.ticker && o.n === 1), 'the fill found on Kalshi is tracked as a real position', JSON.stringify((pinned().PAPERS.late.live || {}).pos));
+  ok(msgs().slice(c20).some(m => /💵 REAL BUY/.test(m)) && !msgs().slice(c20).some(m => /no money spent/.test(m)), 'Telegram reports the real buy, not a false "no money spent"', msgs().slice(c20).join(' || '));
+  delete W.markets[lr.ticker];
+  await send('/_ready 0'); await wait(100);
+  const r20b = W.orders.length, nb = market('KXETH15M', 2.9, 0.85);
+  await send('/_fasttick'); await wait(4000);
+  ok(!W.orders.slice(r20b).some(o => o.ticker === nb.ticker), 'settings not loaded: no new real buy');
+  delete W.markets[nb.ticker]; await send('/_ready 1'); await wait(100);
+  W.pinned = '⚙️ BOT SETTINGS (do not unpin)\n' + JSON.stringify({ ...pinned(), OWNER: { id: 'newer', at: Date.now() + 60e3 } });
+  await send('/_lease'); await wait(300);
+  const r20c = W.orders.length, c20c = msgs().length, pin20 = W.pinned, nc = market('KXXRP15M', 2.9, 0.85);
+  await send('/_fasttick'); await wait(4000);
+  ok(!W.orders.slice(r20c).some(o => o.ticker === nc.ticker), 'a newer copy of the bot is running: this copy places no orders');
+  ok(msgs().length === c20c && W.pinned === pin20, '…sends no Telegram and does not overwrite the saved settings', msgs().slice(c20c).join(' || '));
+  delete W.markets[nc.ticker]; await send('/_unstandby'); await send('/set daystop 0.15'); await send('/set latelive 0'); await wait(300);
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('TEST CRASH', e); process.exit(1); });
