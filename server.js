@@ -864,7 +864,7 @@ const lateRec = k => { const V = lateState().v[k], n = V.n, sum = V.sum, w = V.w
 const LATE_WINDOWS = 50, LATE_PASS = 0.02; // verdict after 50 graded windows: passes at +2¢/contract or better
 const lateLine = x => { const { n, sum, w, avg } = lateRec(x.k), nw = lateState().v[x.k].nw; return `⏰ ${x.name} test: ${n} trades · ${w}W·${n - w}L · ${sum >= 0 ? '+' : '−'}${money(Math.abs(sum))} (${avg >= 0 ? '+' : ''}${(avg * 100).toFixed(1)}¢/contract) · ${Math.min(nw, LATE_WINDOWS)}/${LATE_WINDOWS} windows`; };
 const liveLine = () => { const LV = lateState().live, on = [lateName(lateChamp()), ...LATE_VARIANTS.filter(x => x.slow && lateState().v[x.k].verdict === 'pass').map(x => x.name)].join(' + '); return `💵 REAL ${on} (all coins): ${CFG.LATE_LIVE === 1 ? 'ON' : LV.stopped ? 'STOPPED' : 'OFF'} · ${LV.n} trades · ${LV.w}W·${LV.n - LV.w}L · ${LV.sum >= 0 ? '+' : '−'}${money(Math.abs(LV.sum))} · ${CFG.LATE_STOP >= 10000 ? 'no loss limit' : `stops at −${money(CFG.LATE_STOP)}`} · ${LV.pos.length} open` + (() => { const D = lateDay(), off = dayOff(), t = (LV.sum || 0) - D.s0; return `\n📅 Today ${t >= 0 ? '+' : '−'}${money(Math.abs(t))} (best +${money(D.pk || 0)})${off === 'lock' ? ' · 🔒 profit locked until midnight' : off === 'loss' ? ' · 🛑 day loss limit hit, back at midnight' : (st => st.length ? ` · stops if ${st.join(' or ')}` : ' · no day limits')([...(CFG.DAY_LOSS_PCT > 0 ? [`down ${money(lateDayLoss())}`] : []), ...(CFG.LOCK_KEEP > 0 ? [`it falls below ${Math.round(CFG.LOCK_KEEP * 100)}% of the day's best once it's up ${money(CFG.LOCK_MIN)}`] : [])])}`; })(); };
-// self-learning switch (Brad 11/25): real 15-min money follows whichever rule has proven itself best lately; with none proven it stays on the plain 12th-minute rule (Brad: keep money on)
+// self-learning switch (Brad 11/25): real 15-min money follows whichever rule has proven itself best lately; with none proven it follows the best long-run record (lateFallback; money stays on, Brad)
 const LATE_FAST = () => [{ k: 'm12', name: '12th-minute' }, { k: 'm125', name: '12½-minute' }, { k: 'm12b', name: '12th-min · bid 2¢ under' }, { k: 'm12x', name: '12th-min · sell early if it flips' }, ...LATE_FILTERS.map(F => ({ k: F.k, name: F.name, F }))]; // bid / sell-early: real resting bids and real selling built 11/25 evening (Brad: "Do what's needed"); like the others they only get real money after proving themselves
 const lateRecOf = k => { const L = lateState(); return L.v[k] || L.f[k]; };
 const lateWins = k => { const L = lateState(); return L.f[k] ? Math.max(0, L.v.m12.nw - (L.f[k].s0 || 0)) : (L.v[k] ? L.v[k].nw : 0); }; // 15-min windows each rule has been judged on
@@ -1198,15 +1198,19 @@ async function lateLadder(markets, now) {
   }
   for (const A of [HA, DA]) for (const [ev, a] of Object.entries(A)) if (now > a.c) delete A[ev]; // an anchor is only needed until its window closes (keeps the saved settings small)
 }
+// nothing proven lately: follow the rule with the best long-run record (200+ trades, in profit, not losing lately) instead of always the plain 12th-minute rule,
+// which has the worst one (11/27 10 PM: 12th-minute −$16.58 over 1,805 trades vs max-2-per-side +$13.97/551, calm +$18.31/974, 12½-minute +$11.00/834). Brad 11/27 10:50 PM: "Do what you think is best to gain"
+const lateFallback = () => { const c = LATE_FAST().map(x => ({ k: x.k, R: lateRecOf(x.k) })).filter(o => o.R && o.R.n >= 200 && o.R.sum > 0 && lateRecent(o.R).avg >= 0).sort((a, b) => b.R.sum / b.R.n - a.R.sum / a.R.n); return c.length ? c[0].k : 'm12'; };
 function lateReChamp() { // pick the 15-min rule real money follows; returns the Telegram note when it changes
   const L = lateState(), cur = lateChamp(), pct = k => `${(lateRecent(lateRecOf(k)).avg * 100).toFixed(1)}¢`;
   const ok = LATE_FAST().filter(x => lateOk(x.k)).sort((p, q) => lateRecent(lateRecOf(q.k)).avg - lateRecent(lateRecOf(p.k)).avg), best = ok[0];
   let next = cur;
-  if (!best) next = 'm12'; // nothing proven: Brad's keep-money-on choice — the plain 12th-minute rule
+  if (!best) next = lateFallback(); // nothing proven: money stays on (Brad), on the best long-run rule
   else if (best.k !== cur && (!lateOk(cur) || lateRecent(lateRecOf(best.k)).avg >= lateRecent(lateRecOf(cur)).avg + 0.01)) next = best.k; // a clear winner (≥1¢ better) or the current one stopped proving itself
   if (next === cur) return null;
   L.ch = next; log('LATE CHAMP', cur, '->', next);
-  return next === 'm12' && !best ? `🧠 SELF-LEARNING: "${lateName(cur)}" stopped proving itself (recent ${pct(cur)}/contract) — real 15-min money is back on the plain 12th-minute rule.`
+  const lr = k => { const R = lateRecOf(k); return `${R.sum >= 0 ? '+' : '−'}${money(Math.abs(R.sum))} over ${R.n} trades`; };
+  return !best ? (next === 'm12' ? `🧠 SELF-LEARNING: "${lateName(cur)}" stopped proving itself (recent ${pct(cur)}/contract) — real 15-min money is back on the plain 12th-minute rule.` : `🧠 SELF-LEARNING: "${lateName(cur)}" stopped proving itself (recent ${pct(cur)}/contract) — real 15-min money now follows "${lateName(next)}", the best long-run record (${lr(next)}).`)
     : `🧠 SELF-LEARNING SWITCH: real 15-min money now follows "${lateName(next)}" — recent ${pct(next)}/contract over its last ${lateRecent(lateRecOf(next)).n} trades, ${lateWins(next)} windows (was "${lateName(cur)}" at ${pct(cur)}).\n📈 It's proven, so bets grow with the account: 1 contract per $10 (was $${CFG.LATE_PER}).`;
 }
 async function lateGrade() {
@@ -1742,6 +1746,7 @@ async function onUpdate(u) {
   if (env.BOT_TEST === '1' && t === '/_newsfresh') { S.newsLog.unshift({ title: 'Test: market-moving macro story', level: 'macro', got: Date.now(), at: Date.now() }); return; } // tests: a fresh headline the news filter must see
   if (env.BOT_TEST === '1' && t === '/_newsold') { for (const x of S.newsLog) x.got = 0; return; } // tests: those headlines are old now
   if (env.BOT_TEST === '1' && /^\/_lateelig \w+( \d+)?$/.test(t)) { const L = lateState(), k = t.split(' ')[1], n = Number(t.split(' ')[2] || 60), R = L.f[k] || L.v[k]; Object.assign(R, { n, w: n - 5, sum: 3, b: [Math.min(25, n - 10), 1.5, 10, 0.6] }); if (L.f[k]) R.s0 = L.v.m12.nw - 60; else R.nw = 60; return; } // tests: a rule with 60 windows at +6¢ recently
+  if (env.BOT_TEST === '1' && /^\/_laterec \w+ /.test(t)) { const [, k, n, sum, ...b] = t.split(/\s+/), R = lateRecOf(k); R.n = +n; R.sum = +sum; R.b = b.map(Number); return; } // tests: set a rule's record
   if (env.BOT_TEST === '1' && /^\/_lateinelig \w+$/.test(t)) { const L = lateState(), k = t.split(' ')[1], R = L.f[k] || L.v[k]; R.b = [25, -2, 10, -1]; return; } // tests: that rule stopped proving itself
   if (env.BOT_TEST === '1' && /^\/_latewindows \d+$/.test(t)) { lateState().v.m12.nw = +t.split(' ')[1]; lateState().v.m12.cs = []; return; } // tests: jump the window count
   if (env.BOT_TEST === '1' && t === '/_lateclosed') { for (const x of LATE_VARIANTS) for (const o of lateState().v[x.k].pos) o.c = Date.now() - 4 * 60e3; return; } // tests: pretend the test's windows closed // tests: research findings must not leak into later tests

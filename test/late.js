@@ -487,6 +487,17 @@ W.shards = { 0: 0.66, 2: 0 };
   ok(/📄 UPDATE \(every 3 h/.test(last()) && /💵 REAL/.test(last()) && /📅 Today \+\$\d+\.\d\d \(best \+\$\d+\.\d\d\) · (stops if (down|it falls below)|no day limits)/.test(last()) && /Best 15-min practice rule: .+ over \d+ trades/.test(last()) && /Weather\/sports practice: [+−]\$/.test(last()), 'one 3-hourly update carries the real record, today, the rule followed and practice totals', last());
   await send('/set clean 0'); await send('/set daystop 0.15'); await send('/set latelive 0'); await wait(200);
 
+  console.log('\n19. Nothing proven lately → the best long-run rule, not the plain 12th-minute one (11/27: 12th-minute −$16.58 over 1,805 trades)');
+  for (const k of Object.keys(W.markets)) if (W.markets[k].status === 'open') delete W.markets[k];
+  await send('/_champ bench'); for (const k of ['m12', 'm125', 'm12b', 'm12x', 'cap', 'mdl', 'calm', 'news', 'all', 'bench']) await send('/_lateinelig ' + k);
+  await send('/_laterec calm 300 6 25 0.25 0 0'); await send('/_laterec cap 300 3 25 0.25 0 0'); await send('/_laterec m12 400 -8 25 0.25 0 0'); await send('/_laterec m125 300 9 25 -0.5 0 0'); await wait(100);
+  const c19 = msgs().length, fb19 = market('KXBTC15M', 2.9, 0.85);
+  await send('/_fasttick'); await wait(3000); settle(fb19, 'yes'); await send('/_lateclosed'); await send('/scan'); await wait(5000);
+  await until(() => pinned().PAPERS.late.ch === 'calm');
+  const fm = msgs().slice(c19).find(m => /stopped proving itself/.test(m)) || '';
+  ok(pinned().PAPERS.late.ch === 'calm' && /now follows "12th-min · calm market", the best long-run record \(\+\$6\.\d\d over 30\d trades\)/.test(fm), 'best long-run record in profit and not losing lately (12½-min has more $ but is losing lately; 12th-minute is in the red)', fm || pinned().PAPERS.late.ch);
+  delete W.markets[fb19.ticker];
+
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
